@@ -1,17 +1,19 @@
 # Architecture
 
-Context Arbor is a standard-library Python CLI with `init`, `memory` and `session` entry points.
+> English-only stack/structure facts, not prose -- replace an outdated line, don't append.
+> Update or re-read only when the stack changes, or on request. Cap ~400 tokens
+> (see [[development]]).
 
-Memory uses three time rings:
-
-- Hot: `NOW.md`, limited to the active task and preferred by local retrieval.
-- Warm: rules, architecture, decisions, bugs and investigations.
-- Cold: archived completed entries, excluded from normal retrieval.
-
-`links.md` adds sparse bilingual aliases and Obsidian links across the rings. Retrieval is local,
-excludes templates and archives, and weights hot or linked facts above general journal matches.
-No model, provider key or network request participates in retrieval.
-
-Session state lives in `.arbor/session-state.md`; legacy `.ctx` state migrates on first read.
-Claude Code hooks can snapshot and restore session state around native compaction. Agent adapters
-point to `NOW.md` and search on demand instead of loading the vault.
+- Language/runtime: Python 3.10+, standard library only, no third-party dependency.
+- Single entry point: `arbor.py` (commands: `init`, `memory`, `session`).
+- Memory: Markdown vault in `memory/`, three time rings -- hot (`NOW.md`), warm
+  (rules/architecture/decisions/bugs/investigations), cold (`archive/`, excluded from
+  retrieval). See [[decisions#DEC-20260914-001 Context Arbor memory topology]].
+- Entries (TASK/BUG/DEC/INV) may carry typed `Relations:` edges to other entry IDs;
+  `memory trace <ID>` walks them locally, no model. See
+  [[decisions#DEC-20260914-003 Typed Relations field and local trace]].
+- Retrieval (`memory query`): local lexical top-k, no model/network, excludes
+  templates/archive, weights the hot ring and `links.md` anchors above general matches.
+- Session state: `.arbor/session-state.md`; Claude Code hooks snapshot/restore it around
+  native compaction (`session gauge/snapshot/restore`).
+- Agent adapters point to `NOW.md` and search on demand; the vault is never loaded in full.

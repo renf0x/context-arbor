@@ -5,4 +5,5 @@
 - Decision:
 - Reason:
 - Consequences:
+- Relations:
 - Links:

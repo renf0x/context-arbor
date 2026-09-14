@@ -5,4 +5,5 @@
 - Question:
 - Findings:
 - Conclusion:
+- Relations:
 - Links:

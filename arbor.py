@@ -8,7 +8,7 @@ Commands: init, memory, session. Python standard library only.
 from __future__ import annotations
 
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 
 import argparse
@@ -71,6 +71,12 @@ MEMORY_LINE_LIMIT = 120
 NOW_MAX_TOKENS = 1500
 
 
+# Deliberately tight: architecture.md holds only the most important extract (stack,
+# key libraries, structure boundaries), not prose or rationale -- that stays in
+# decisions.md/investigations.md, which architecture.md can link to.
+ARCHITECTURE_MAX_TOKENS = 400
+
+
 JOURNAL_MAX_TOKENS = 8000
 
 
@@ -88,6 +94,25 @@ WIKI_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 
 ENTRY_RE = re.compile(r"(?m)^##\s+((?:TASK|BUG|DEC|INV)-[^\n]+)\n")
+
+
+# A narrow, typed edge between two entries, e.g. `Relations: supersedes:DEC-20260914-001`.
+# Direction is always "this entry -> target". Kept deliberately small: extend only when a
+# real recurring question needs a new type, per the article's "earns its cost" criteria
+# (see DEC-20260914-003 / INV-20260914-002) -- not a general-purpose knowledge graph.
+RELATION_TYPES = ("supersedes", "caused-by", "blocks", "depends-on", "relates-to")
+
+
+ID_PATTERN = r"(?:TASK|BUG|DEC|INV)-\d{8}-\d{3}"
+
+
+ID_HEAD_RE = re.compile(rf"(?m)^##\s+({ID_PATTERN})\b")
+
+
+RELATION_LINE_RE = re.compile(r"(?mi)^-\s*Relations:\s*(.+)$")
+
+
+RELATION_ITEM_RE = re.compile(rf"([a-z][a-z-]*)\s*:\s*({ID_PATTERN})")
 
 
 MEMORY_TEMPLATES = {
@@ -140,6 +165,7 @@ MEMORY_TEMPLATES = {
 - Scope:
 - Next:
 - Verification:
+- Relations:
 - Links:
 """,
     "project-rules.md": """# Permanent Project Rules
@@ -159,7 +185,12 @@ MEMORY_TEMPLATES = {
 - Rule: After memory initialization, run
   `python arbor.py memory open --install-obsidian` once for project bootstrap.
 """,
-    "architecture.md": "# Architecture\n\nProject architecture and stable component boundaries.\n",
+    "architecture.md": (
+        "# Architecture\n\n"
+        "> English-only stack/structure facts, not prose -- replace an outdated line, "
+        "don't append. Update or re-read only when the stack changes, or on request. "
+        f"Cap ~{ARCHITECTURE_MAX_TOKENS} tokens (see [[development]]).\n"
+    ),
     "development.md": """# Development Method
 
 Use for non-trivial implementation work; this note is not loaded automatically.
@@ -187,9 +218,9 @@ commit `2c606141936f1eeef17fa3043a72095b4765b9c2`).
 - Aliases EN:
 - Links:
 """,
-    "decisions.md": "# Decision Log\n\n## DEC-000 Template\n\n- Status: example\n- Date: YYYY-MM-DD\n- Decision:\n- Reason:\n- Consequences:\n- Links:\n",
-    "bugs.md": "# Bug Log\n\n## BUG-000 Template\n\n- Status: example\n- Date: YYYY-MM-DD\n- Symptom:\n- Cause:\n- Resolution:\n- Regression test:\n- Links:\n",
-    "investigations.md": "# Investigation Log\n\n## INV-000 Template\n\n- Status: example\n- Date: YYYY-MM-DD\n- Question:\n- Findings:\n- Conclusion:\n- Links:\n",
+    "decisions.md": "# Decision Log\n\n## DEC-000 Template\n\n- Status: example\n- Date: YYYY-MM-DD\n- Decision:\n- Reason:\n- Consequences:\n- Relations:\n- Links:\n",
+    "bugs.md": "# Bug Log\n\n## BUG-000 Template\n\n- Status: example\n- Date: YYYY-MM-DD\n- Symptom:\n- Cause:\n- Resolution:\n- Regression test:\n- Relations:\n- Links:\n",
+    "investigations.md": "# Investigation Log\n\n## INV-000 Template\n\n- Status: example\n- Date: YYYY-MM-DD\n- Question:\n- Findings:\n- Conclusion:\n- Relations:\n- Links:\n",
     "operations.md": "# Operations\n\nCommands, verification steps, and operational constraints.\n",
     "changelog.md": "# Memory Changelog\n\nRecord meaningful changes to the memory system.\n",
     "templates/task.md": """## TASK-YYYYMMDD-NNN
@@ -202,6 +233,7 @@ commit `2c606141936f1eeef17fa3043a72095b4765b9c2`).
 - Scope:
 - Next:
 - Verification:
+- Relations:
 - Links:
 """,
     "templates/bug.md": """## BUG-YYYYMMDD-NNN
@@ -212,6 +244,7 @@ commit `2c606141936f1eeef17fa3043a72095b4765b9c2`).
 - Cause:
 - Resolution:
 - Regression test:
+- Relations:
 - Links:
 """,
     "templates/decision.md": """## DEC-YYYYMMDD-NNN
@@ -221,6 +254,7 @@ commit `2c606141936f1eeef17fa3043a72095b4765b9c2`).
 - Decision:
 - Reason:
 - Consequences:
+- Relations:
 - Links:
 """,
     "templates/investigation.md": """## INV-YYYYMMDD-NNN
@@ -230,6 +264,7 @@ commit `2c606141936f1eeef17fa3043a72095b4765b9c2`).
 - Question:
 - Findings:
 - Conclusion:
+- Relations:
 - Links:
 """,
     ".obsidian/app.json": json.dumps({
@@ -370,6 +405,12 @@ def memory_check(root: Path) -> list[dict[str, str]]:
         issues.append({"code": "hot-ring-too-large", "path": "memory/NOW.md",
                        "message": f"over {NOW_MAX_TOKENS} estimated tokens; archive completed tasks"})
 
+    architecture = memory / "architecture.md"
+    if architecture.is_file() and est_tokens(read_text(architecture)) > ARCHITECTURE_MAX_TOKENS:
+        issues.append({"code": "architecture-too-large", "path": "memory/architecture.md",
+                       "message": f"over {ARCHITECTURE_MAX_TOKENS} estimated tokens; keep only "
+                                  "the most important stack/structure facts, not prose"})
+
     for name in MEMORY_JOURNALS:
         journal = memory / name
         if journal.is_file() and est_tokens(read_text(journal)) > JOURNAL_MAX_TOKENS:
@@ -394,7 +435,129 @@ def memory_check(root: Path) -> list[dict[str, str]]:
         if expected != actual:
             issues.append({"code": "rules-changed", "path": "memory/project-rules.md",
                            "message": "rules changed without approved checksum update"})
+
+    if memory.is_dir():
+        _ids, _edges, relation_issues = _relations_graph(memory)
+        issues.extend(relation_issues)
     return issues
+
+
+def _entry_blocks(text: str) -> list[tuple[str, str]]:
+    """Split a note into (entry_id, block) pairs at each `## ID` heading whose
+    ID matches the strict `TYPE-YYYYMMDD-NNN` format (template placeholders
+    like `DEC-YYYYMMDD-NNN` never match, so templates need no special-casing)."""
+    matches = list(ID_HEAD_RE.finditer(text))
+    blocks: list[tuple[str, str]] = []
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        blocks.append((m.group(1), text[m.start():end]))
+    return blocks
+
+
+def _relations_graph(
+    memory: Path,
+) -> tuple[dict[str, str], dict[str, list[tuple[str, str]]], list[dict[str, str]]]:
+    """The local entry graph: which note defines each ID, the typed `Relations:`
+    edges each entry declares, and any validation issues. Deterministic, no
+    model, no network -- entries and edges come only from files already on disk.
+    Archived notes are included so a rotated ID does not look dangling."""
+    ids: dict[str, str] = {}
+    raw_edges: list[tuple[str, str, str, str]] = []  # (entry_id, rtype, target, defining note)
+    for note in sorted(memory.rglob("*.md")):
+        rel_note = note.relative_to(memory).with_suffix("").as_posix()
+        text = read_text(note)
+        for entry_id, block in _entry_blocks(text):
+            ids.setdefault(entry_id, rel_note)
+            match = RELATION_LINE_RE.search(block)
+            if not match:
+                continue
+            for rtype, target in RELATION_ITEM_RE.findall(match.group(1)):
+                raw_edges.append((entry_id, rtype.lower(), target, rel_note))
+
+    edges: dict[str, list[tuple[str, str]]] = {}
+    issues: list[dict[str, str]] = []
+    for entry_id, rtype, target, rel_note in raw_edges:
+        if rtype not in RELATION_TYPES:
+            issues.append({"code": "unknown-relation-type",
+                           "path": f"memory/{rel_note}.md",
+                           "message": f"{entry_id}: {rtype!r} is not a known relation type "
+                                      f"({', '.join(RELATION_TYPES)})"})
+            continue
+        edges.setdefault(entry_id, []).append((rtype, target))
+        if target not in ids:
+            issues.append({"code": "dangling-relation",
+                           "path": f"memory/{rel_note}.md",
+                           "message": f"{entry_id} {rtype} {target}, which no entry defines"})
+    return ids, edges, issues
+
+
+def _invert_edges(edges: dict[str, list[tuple[str, str]]]) -> dict[str, list[tuple[str, str]]]:
+    incoming: dict[str, list[tuple[str, str]]] = {}
+    for source, rels in edges.items():
+        for rtype, target in rels:
+            incoming.setdefault(target, []).append((rtype, source))
+    return incoming
+
+
+def _trace_direction(start: str, adjacency: dict[str, list[tuple[str, str]]],
+                     ids: dict[str, str], depth: int) -> list[dict[str, object]]:
+    """Breadth-first walk of one edge direction up to `depth` hops. Deterministic:
+    edges expand in declaration order and each ID is visited at most once, so a
+    cycle (A blocks B, B blocks A) cannot loop. This is the whole traversal --
+    no ranking, no model call, just following typed edges already on disk."""
+    rows: list[dict[str, object]] = []
+    seen = {start}
+    frontier = [start]
+    for level in range(1, depth + 1):
+        next_frontier: list[str] = []
+        for node in frontier:
+            for rtype, other in adjacency.get(node, []):
+                rows.append({"from": node, "relation": rtype, "to": other, "depth": level,
+                            "resolved": other in ids, "note": ids.get(other)})
+                if other not in seen:
+                    seen.add(other)
+                    next_frontier.append(other)
+        frontier = next_frontier
+        if not frontier:
+            break
+    return rows
+
+
+def cmd_memory_trace(args: argparse.Namespace) -> int:
+    """Follow typed `Relations:` edges from one entry ID: what it leads to
+    (outgoing) and what points to it (incoming), up to --depth hops. Answers a
+    connected, multi-hop question ("what led to DEC-017?") the way a small graph
+    would, without a database or a model -- local traversal over the vault."""
+    root = _project_root(args.path)
+    memory = root / "memory"
+    ids, edges, _issues = _relations_graph(memory)
+    if args.id not in ids:
+        sys.stderr.write(f"[arbor] unknown entry ID: {args.id}\n")
+        return 2
+    incoming = _invert_edges(edges)
+    outgoing_rows = _trace_direction(args.id, edges, ids, args.depth)
+    incoming_rows = _trace_direction(args.id, incoming, ids, args.depth)
+    if args.json:
+        print(json.dumps({"id": args.id, "note": ids[args.id], "depth": args.depth,
+                          "outgoing": outgoing_rows, "incoming": incoming_rows},
+                         ensure_ascii=False, indent=2))
+        return 0
+
+    def render(rows: list[dict[str, object]], label: str, reverse: bool) -> None:
+        print(f"\n## {label}")
+        if not rows:
+            print("(none)")
+            return
+        for row in rows:
+            indent = "  " * (row["depth"] - 1)
+            left, right = (row["to"], row["from"]) if reverse else (row["from"], row["to"])
+            where = f" [memory/{row['note']}.md]" if row["resolved"] else " [unresolved]"
+            print(f"{indent}{left} --{row['relation']}--> {right}{where}")
+
+    print(f"# trace: {args.id} (memory/{ids[args.id]}.md)")
+    render(outgoing_rows, "Outgoing (what this leads to)", reverse=False)
+    render(incoming_rows, "Incoming (what points to this)", reverse=True)
+    return 0
 
 
 def cmd_memory_check(args: argparse.Namespace) -> int:
@@ -1084,8 +1247,21 @@ def _append_managed_block(path: Path, block: str) -> str:
     return "appended"
 
 
-AGENT_CONTEXT_MD = '# Context Arbor: memory and sessions\n\nWhen prior project context is needed, read `memory/NOW.md` first and follow links on demand.\nSearch durable notes with `python arbor.py memory query "question"`; do not scan the vault.\nKeep only the active task in `memory/NOW.md`; store durable outcomes in linked notes.\nPreserve user rules. Update their checksum only after explicit user approval.\nBefore clearing context, save useful state with `python arbor.py session save --note "..."`.\nUse `python arbor.py session restore` to recover it. Treat restored notes as potentially stale.\nOpen the vault with `python arbor.py memory open`. Context Arbor invokes no model.\n'
-ADAPTER_AGENTS = ADAPTER_CLAUDE = '<!-- CONTEXT-ARBOR:START -->\n# Context Arbor: memory and sessions\n\nWhen prior project context is needed, read `memory/NOW.md` first and follow links on demand.\nSearch durable notes with `python arbor.py memory query "question"`; do not scan the vault.\nKeep only the active task in `memory/NOW.md`; store durable outcomes in linked notes.\nPreserve user rules. Update their checksum only after explicit user approval.\nBefore clearing context, save useful state with `python arbor.py session save --note "..."`.\nUse `python arbor.py session restore` to recover it. Treat restored notes as potentially stale.\nOpen the vault with `python arbor.py memory open`. Context Arbor invokes no model.\n\n<!-- CONTEXT-ARBOR:END -->\n'
+_ARCHITECTURE_ADAPTER_LINE = (
+    f"Update `memory/architecture.md` only when the stack or structure changes "
+    f"(short English facts, ~{ARCHITECTURE_MAX_TOKENS} tokens); otherwise leave it, "
+    f"and read it again only then or when asked directly."
+)
+AGENT_CONTEXT_MD = (
+    '# Context Arbor: memory and sessions\n\nWhen prior project context is needed, read `memory/NOW.md` first and follow links on demand.\nSearch durable notes with `python arbor.py memory query "question"`; do not scan the vault.\nKeep only the active task in `memory/NOW.md`; store durable outcomes in linked notes.\n'
+    + _ARCHITECTURE_ADAPTER_LINE +
+    '\nPreserve user rules. Update their checksum only after explicit user approval.\nBefore clearing context, save useful state with `python arbor.py session save --note "..."`.\nUse `python arbor.py session restore` to recover it. Treat restored notes as potentially stale.\nOpen the vault with `python arbor.py memory open`. Context Arbor invokes no model.\n'
+)
+ADAPTER_AGENTS = ADAPTER_CLAUDE = (
+    '<!-- CONTEXT-ARBOR:START -->\n# Context Arbor: memory and sessions\n\nWhen prior project context is needed, read `memory/NOW.md` first and follow links on demand.\nSearch durable notes with `python arbor.py memory query "question"`; do not scan the vault.\nKeep only the active task in `memory/NOW.md`; store durable outcomes in linked notes.\n'
+    + _ARCHITECTURE_ADAPTER_LINE +
+    '\nPreserve user rules. Update their checksum only after explicit user approval.\nBefore clearing context, save useful state with `python arbor.py session save --note "..."`.\nUse `python arbor.py session restore` to recover it. Treat restored notes as potentially stale.\nOpen the vault with `python arbor.py memory open`. Context Arbor invokes no model.\n\n<!-- CONTEXT-ARBOR:END -->\n'
+)
 
 CLAUDE_SETTINGS_JSON = json.dumps({
     "autoMemoryEnabled": False,
@@ -1278,6 +1454,15 @@ def main(argv: list[str] | None = None) -> int:
     mem_open.add_argument("path", nargs="?", default=".")
     mem_open.add_argument("--install-obsidian", action="store_true")
     mem_open.set_defaults(fn=cmd_memory_open)
+
+    mem_trace = mem_sub.add_parser(
+        "trace",
+        help="follow typed Relations edges from an entry ID (local graph, no LLM)")
+    mem_trace.add_argument("id", help="entry ID, e.g. DEC-20260914-003")
+    mem_trace.add_argument("--path", default=".")
+    mem_trace.add_argument("--depth", type=int, default=2, help="max hops per direction")
+    mem_trace.add_argument("--json", action="store_true")
+    mem_trace.set_defaults(fn=cmd_memory_trace)
 
     ses = sub.add_parser(
         "session",

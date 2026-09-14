@@ -80,6 +80,20 @@ class MemoryTests(unittest.TestCase):
         (self.root / "memory" / "NOW.md").write_text("active " * 1000, encoding="utf-8")
         self.assertIn("hot-ring-too-large", {i["code"] for i in ctx.memory_check(self.root)})
 
+    def test_default_architecture_template_is_under_its_own_cap(self):
+        self.init_memory()
+        text = (self.root / "memory" / "architecture.md").read_text(encoding="utf-8")
+        self.assertLessEqual(ctx.est_tokens(text), ctx.ARCHITECTURE_MAX_TOKENS)
+        self.assertNotIn("architecture-too-large",
+                         {i["code"] for i in ctx.memory_check(self.root)})
+
+    def test_check_limits_architecture_note(self):
+        self.init_memory()
+        (self.root / "memory" / "architecture.md").write_text("stack fact " * 400,
+                                                               encoding="utf-8")
+        self.assertIn("architecture-too-large",
+                      {i["code"] for i in ctx.memory_check(self.root)})
+
 
     def test_rules_change_requires_approval(self):
         self.init_memory()
@@ -261,6 +275,12 @@ class MemoryTests(unittest.TestCase):
 
 
     @mock.patch.dict(os.environ, {"APPDATA": ""}, clear=False)
+    def test_adapter_blocks_tell_the_agent_when_to_touch_architecture_md(self):
+        for block in (ctx.AGENT_CONTEXT_MD, ctx.ADAPTER_CLAUDE, ctx.ADAPTER_AGENTS):
+            self.assertIn("memory/architecture.md", block)
+            self.assertIn("only when the stack or structure changes", block)
+            self.assertIn("read it again only then or when asked directly", block)
+
     def test_register_vault_preserves_existing_entries(self):
         appdata = self.root / "appdata"
         with mock.patch.dict(os.environ, {"APPDATA": str(appdata)}, clear=False):

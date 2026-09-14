@@ -6,4 +6,5 @@
 - Cause:
 - Resolution:
 - Regression test:
+- Relations:
 - Links:
