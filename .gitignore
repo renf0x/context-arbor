@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.arbor/
+.ctx/
+.claude/settings.local.json
+.codegraph/
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
