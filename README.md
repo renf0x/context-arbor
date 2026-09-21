@@ -54,6 +54,23 @@ python arbor.py memory open --install-obsidian
 меняется или дополняется, и перечитывает файл только тогда же или по прямой просьбе — не в
 каждой сессии.
 
+### Запись из программ
+
+Записями можно управлять из CLI, чтобы память вели и приложения, а не только агент:
+
+```
+python arbor.py memory add --type IDEA --title "…" --field Source=chat --json
+python arbor.py memory get IDEA-20260921-001 --json
+python arbor.py memory list --type IDEA --status idea,in-progress --json
+python arbor.py memory update IDEA-20260921-001 --status in-progress
+python arbor.py memory close IDEA-20260921-001
+python arbor.py memory delete IDEA-20260921-001
+```
+
+Кроме `TASK`, `BUG`, `DEC`, `INV` есть типы `IDEA` (идеи → `ideas.md`), `KNW` (знания →
+`knowledge.md`) и `CHG` (история изменений → помесячно `history/YYYY-MM.md`). Запись атомарна и
+идёт под lock-файлом, поэтому приложение и агент могут писать одновременно.
+
 ## Типизированные связи между записями
 
 Записи TASK/BUG/DEC/INV могут указать поле `Relations:` — связь с другой записью по её ID:

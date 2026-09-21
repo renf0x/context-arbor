@@ -8,7 +8,7 @@ Commands: init, memory, session. Python standard library only.
 from __future__ import annotations
 
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 
 import argparse
@@ -87,13 +87,41 @@ MEMORY_JOURNALS = {
     "bugs.md": "bugs",
     "decisions.md": "decisions",
     "investigations.md": "investigations",
+    "ideas.md": "ideas",
+    "knowledge.md": "knowledge",
 }
 
 
 WIKI_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 
-ENTRY_RE = re.compile(r"(?m)^##\s+((?:TASK|BUG|DEC|INV)-[^\n]+)\n")
+# Entry types: prefix -> (note that `memory add` writes to, default status, field order).
+# CHG entries go to monthly `history/YYYY-MM.md` files so retention is a file-level prune.
+ENTRY_TYPES: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "TASK": ("NOW.md", "next", ("Goal", "Success", "Constraints", "Assumptions / unknowns",
+                                "Scope", "Next", "Verification")),
+    "BUG": ("bugs.md", "open", ("Date", "Symptom", "Cause", "Resolution", "Regression test")),
+    "DEC": ("decisions.md", "active", ("Date", "Decision", "Reason", "Consequences")),
+    "INV": ("investigations.md", "open", ("Date", "Question", "Findings", "Conclusion")),
+    "IDEA": ("ideas.md", "idea", ("Date", "Author", "Summary", "Motivation", "Proposal",
+                                  "Source")),
+    "KNW": ("knowledge.md", "active", ("Date", "Topic", "Fact", "Evidence", "Source")),
+    "CHG": ("history/{month}.md", "recorded", ("Date", "Target", "Kind", "Author", "Summary",
+                                               "Before", "After")),
+}
+
+
+TYPE_ALT = "|".join(ENTRY_TYPES)
+
+
+NOTE_HEADERS = {
+    "ideas.md": "# Ideas and Tasks\n\n> App improvement ideas and tasks (IDEA-*). Managed via "
+                "`python arbor.py memory add --type IDEA`.\n",
+    "knowledge.md": "# Agent Knowledge\n\n> Confirmed facts, verdicts and domain rules (KNW-*).\n",
+}
+
+
+ENTRY_RE = re.compile(rf"(?m)^##\s+((?:{TYPE_ALT})-[^\n]+)\n")
 
 
 # A narrow, typed edge between two entries, e.g. `Relations: supersedes:DEC-20260914-001`.
@@ -103,7 +131,7 @@ ENTRY_RE = re.compile(r"(?m)^##\s+((?:TASK|BUG|DEC|INV)-[^\n]+)\n")
 RELATION_TYPES = ("supersedes", "caused-by", "blocks", "depends-on", "relates-to")
 
 
-ID_PATTERN = r"(?:TASK|BUG|DEC|INV)-\d{8}-\d{3}"
+ID_PATTERN = rf"(?:{TYPE_ALT})-\d{{8}}-\d{{3}}"
 
 
 ID_HEAD_RE = re.compile(rf"(?m)^##\s+({ID_PATTERN})\b")
@@ -772,6 +800,301 @@ def cmd_memory_rules_approve(args: argparse.Namespace) -> int:
         return 2
     _write_rules_digest(memory)
     print("# permanent rules checksum updated after explicit user approval")
+    return 0
+
+
+# --- Entry CRUD -------------------------------------------------------------
+# Entries are `## ID Title` blocks of `- Key: value` lines. Multi-line values are
+# stored as continuation lines indented by two spaces. Writers take a vault lock
+# and replace files atomically, because the app and coding agents share a vault.
+
+FIELD_RE = re.compile(r"^-\s*([^:\n]+?):[ \t]?(.*)$")
+
+
+class _VaultLock:
+    def __init__(self, memory: Path, timeout: float = 10.0, stale: float = 30.0):
+        self.path = memory / ".arbor.lock"
+        self.timeout = timeout
+        self.stale = stale
+
+    def __enter__(self) -> "_VaultLock":
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode())
+                os.close(fd)
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - self.path.stat().st_mtime > self.stale:
+                        self.path.unlink()
+                        continue
+                except FileNotFoundError:
+                    continue
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"vault is locked: {self.path}")
+                time.sleep(0.05)
+
+    def __exit__(self, *exc: object) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _parse_entry(entry_id: str, block: str) -> dict[str, object]:
+    lines = block.rstrip("\n").splitlines()
+    head = lines[0] if lines else ""
+    title = head.split(entry_id, 1)[1].strip() if entry_id in head else ""
+    fields: dict[str, str] = {}
+    current: str | None = None
+    for line in lines[1:]:
+        m = FIELD_RE.match(line)
+        if m:
+            current = m.group(1).strip()
+            fields[current] = m.group(2).rstrip()
+        elif current is not None and line.startswith("  "):
+            fields[current] += "\n" + line[2:]
+        elif line.strip():
+            current = None
+    return {"id": entry_id, "type": entry_id.split("-", 1)[0], "title": title,
+            "status": fields.get("Status", ""), "fields": fields}
+
+
+def _render_entry(entry_id: str, title: str, fields: dict[str, str]) -> str:
+    out = [f"## {entry_id}" + (f" {title}" if title else ""), ""]
+    for key, value in fields.items():
+        first, *rest = (value or "").split("\n")
+        out.append(f"- {key}: {first}".rstrip())
+        out.extend("  " + line for line in rest)
+    return "\n".join(out) + "\n"
+
+
+def _entry_notes(memory: Path, include_archive: bool = False):
+    for note in sorted(memory.rglob("*.md")):
+        parts = note.relative_to(memory).parts
+        if "templates" in parts or (not include_archive and "archive" in parts):
+            continue
+        yield note
+
+
+def _find_entry(memory: Path, entry_id: str) -> tuple[Path, str, str] | None:
+    for note in _entry_notes(memory, include_archive=True):
+        text = read_text(note)
+        for eid, block in _entry_blocks(text):
+            if eid == entry_id:
+                return note, text, block
+    return None
+
+
+def _next_id(memory: Path, prefix: str, day: str) -> str:
+    stem = f"{prefix}-{day}-"
+    used = 0
+    for note in _entry_notes(memory, include_archive=True):
+        for eid, _block in _entry_blocks(read_text(note)):
+            if eid.startswith(stem):
+                used = max(used, int(eid[-3:]))
+    if used >= 999:
+        raise ValueError(f"no free {prefix} IDs left for {day}")
+    return f"{stem}{used + 1:03d}"
+
+
+def _entry_payload(args: argparse.Namespace) -> dict[str, object]:
+    """Merge `--input-json` (stdin JSON: title/status/fields) with CLI flags."""
+    data: dict[str, object] = {}
+    if getattr(args, "input_json", False):
+        # PowerShell pipes add a UTF-8 BOM; accept it.
+        raw = sys.stdin.read().lstrip("﻿")
+        data = json.loads(raw) if raw.strip() else {}
+    fields = dict(data.get("fields") or {})
+    for item in getattr(args, "field", None) or []:
+        key, sep, value = item.partition("=")
+        if not sep:
+            raise ValueError(f"--field expects KEY=VALUE, got {item!r}")
+        fields[key.strip()] = value
+    data["fields"] = {str(k): "" if v is None else str(v) for k, v in fields.items()}
+    if getattr(args, "title", None) is not None:
+        data["title"] = args.title
+    if getattr(args, "status", None) is not None:
+        data["status"] = args.status
+    return data
+
+
+def _emit(args: argparse.Namespace, payload: object, text: str) -> None:
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(text)
+
+
+def _fail(message: str, code: int = 2) -> int:
+    sys.stderr.write(f"[arbor] {message}\n")
+    return code
+
+
+def cmd_memory_add(args: argparse.Namespace) -> int:
+    memory = _memory_root(args.path)
+    prefix = args.type.upper()
+    if prefix not in ENTRY_TYPES:
+        return _fail(f"unknown type {prefix}; known: {', '.join(ENTRY_TYPES)}")
+    try:
+        data = _entry_payload(args)
+    except (ValueError, json.JSONDecodeError) as exc:
+        return _fail(str(exc))
+    note_tpl, default_status, order = ENTRY_TYPES[prefix]
+    today = datetime.date.today()
+    note = memory / note_tpl.format(month=today.strftime("%Y-%m"))
+    given: dict[str, str] = data["fields"]  # type: ignore[assignment]
+    fields = {"Status": str(data.get("status") or given.pop("Status", "") or default_status)}
+    for key in order:
+        fields[key] = given.pop(key, today.isoformat() if key == "Date" else "")
+    fields.update(given)
+    fields.setdefault("Relations", "")
+    fields.setdefault("Links", "")
+    with _VaultLock(memory):
+        entry_id = _next_id(memory, prefix, today.strftime("%Y%m%d"))
+        if note.exists():
+            current = read_text(note)
+        elif note.name in NOTE_HEADERS:
+            current = NOTE_HEADERS[note.name]
+        elif prefix == "CHG":
+            current = f"# Change History {today.strftime('%Y-%m')}\n"
+        else:
+            current = f"# {note.stem}\n"
+        block = _render_entry(entry_id, str(data.get("title") or ""), fields)
+        _atomic_write(note, current.rstrip() + "\n\n" + block)
+    entry = _parse_entry(entry_id, block)
+    entry["note"] = note.relative_to(memory).as_posix()
+    _emit(args, entry, f"# added {entry_id} -> memory/{entry['note']}")
+    return 0
+
+
+def cmd_memory_get(args: argparse.Namespace) -> int:
+    memory = _memory_root(args.path)
+    found = _find_entry(memory, args.id)
+    if not found:
+        return _fail(f"unknown entry ID: {args.id}")
+    note, _text, block = found
+    entry = _parse_entry(args.id, block)
+    entry["note"] = note.relative_to(memory).as_posix()
+    _emit(args, entry, block.rstrip())
+    return 0
+
+
+def cmd_memory_list(args: argparse.Namespace) -> int:
+    memory = _memory_root(args.path)
+    types = {t.strip().upper() for t in (args.type or "").split(",") if t.strip()}
+    statuses = {s.strip().lower() for s in (args.status or "").split(",") if s.strip()}
+    rows: list[dict[str, object]] = []
+    for note in _entry_notes(memory, include_archive=args.include_archive):
+        for eid, block in _entry_blocks(read_text(note)):
+            entry = _parse_entry(eid, block)
+            if types and entry["type"] not in types:
+                continue
+            if statuses and str(entry["status"]).lower() not in statuses:
+                continue
+            entry["note"] = note.relative_to(memory).as_posix()
+            rows.append(entry)
+    rows.sort(key=lambda e: str(e["id"]), reverse=True)
+    if args.limit:
+        rows = rows[:args.limit]
+    text = "\n".join(f"{e['id']}  [{e['status']}]  {e['title']}" for e in rows) or "(none)"
+    _emit(args, {"entries": rows}, text)
+    return 0
+
+
+def _rewrite_entry(memory: Path, entry_id: str, change) -> tuple[int, dict[str, object] | None]:
+    with _VaultLock(memory):
+        found = _find_entry(memory, entry_id)
+        if not found:
+            return _fail(f"unknown entry ID: {entry_id}"), None
+        note, text, block = found
+        new_block = change(_parse_entry(entry_id, block))
+        start = text.index(block)
+        replacement = new_block + "\n" if new_block else ""
+        new_text = text[:start] + replacement + text[start + len(block):]
+        new_text = re.sub(r"\n{3,}", "\n\n", new_text)
+        _atomic_write(note, new_text.rstrip() + "\n")
+    if not new_block:
+        return 0, None
+    entry = _parse_entry(entry_id, new_block)
+    entry["note"] = note.relative_to(memory).as_posix()
+    return 0, entry
+
+
+def cmd_memory_update(args: argparse.Namespace) -> int:
+    memory = _memory_root(args.path)
+    try:
+        data = _entry_payload(args)
+    except (ValueError, json.JSONDecodeError) as exc:
+        return _fail(str(exc))
+
+    def change(entry: dict[str, object]) -> str:
+        fields: dict[str, str] = dict(entry["fields"])  # type: ignore[arg-type]
+        fields.update(data["fields"])  # type: ignore[arg-type]
+        if data.get("status") is not None:
+            fields["Status"] = str(data["status"])
+        title = str(data["title"]) if data.get("title") is not None else str(entry["title"])
+        return _render_entry(args.id, title, fields)
+
+    code, entry = _rewrite_entry(memory, args.id, change)
+    if code == 0:
+        _emit(args, entry, f"# updated {args.id}")
+    return code
+
+
+def cmd_memory_close(args: argparse.Namespace) -> int:
+    args.field, args.title, args.input_json = [], None, False
+    args.status = args.status or "closed"
+    return cmd_memory_update(args)
+
+
+def cmd_memory_delete(args: argparse.Namespace) -> int:
+    if not args.yes:
+        return _fail("refusing to delete without --yes")
+    memory = _memory_root(args.path)
+    code, _entry = _rewrite_entry(memory, args.id, lambda _e: "")
+    if code == 0:
+        _emit(args, {"id": args.id, "deleted": True}, f"# deleted {args.id}")
+    return code
+
+
+def cmd_memory_prune(args: argparse.Namespace) -> int:
+    """Retention: delete monthly history (and optionally archive) files older
+    than N months. Month files are named YYYY-MM.md, so no parsing is needed."""
+    memory = _memory_root(args.path)
+    today = datetime.date.today()
+    cutoff = today.year * 12 + today.month - 1 - args.older_than_months
+    dirs = [memory / "history"]
+    if args.include_archive:
+        dirs += [d for d in (memory / "archive").glob("*") if d.is_dir()]
+    removed: list[str] = []
+    with _VaultLock(memory):
+        for folder in dirs:
+            for f in sorted(folder.glob("*.md")) if folder.is_dir() else []:
+                m = re.fullmatch(r"(\d{4})-(\d{2})\.md", f.name)
+                if m and int(m.group(1)) * 12 + int(m.group(2)) - 1 < cutoff:
+                    if not args.dry_run:
+                        f.unlink()
+                    removed.append(f.relative_to(memory).as_posix())
+    _emit(args, {"removed": removed, "dry_run": args.dry_run},
+          f"# pruned {len(removed)} file(s)" + (" (dry run)" if args.dry_run else ""))
     return 0
 
 
@@ -1463,6 +1786,44 @@ def main(argv: list[str] | None = None) -> int:
     mem_trace.add_argument("--depth", type=int, default=2, help="max hops per direction")
     mem_trace.add_argument("--json", action="store_true")
     mem_trace.set_defaults(fn=cmd_memory_trace)
+
+    def entry_writer(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--title")
+        parser.add_argument("--status")
+        parser.add_argument("--field", action="append", metavar="KEY=VALUE")
+        parser.add_argument("--input-json", action="store_true",
+                            help="read {title, status, fields} JSON from stdin")
+
+    mem_add = mem_sub.add_parser("add", help="append a new typed entry, print its ID")
+    mem_add.add_argument("--type", required=True, help=", ".join(ENTRY_TYPES))
+    entry_writer(mem_add)
+    mem_get = mem_sub.add_parser("get", help="show one entry by ID")
+    mem_get.add_argument("id")
+    mem_list = mem_sub.add_parser("list", help="list entries (filter by type/status)")
+    mem_list.add_argument("--type", help="comma list, e.g. IDEA,KNW")
+    mem_list.add_argument("--status", help="comma list, e.g. idea,in-progress")
+    mem_list.add_argument("--include-archive", action="store_true")
+    mem_list.add_argument("--limit", type=int, default=0)
+    mem_update = mem_sub.add_parser("update", help="change fields/title/status of an entry")
+    mem_update.add_argument("id")
+    entry_writer(mem_update)
+    mem_close = mem_sub.add_parser("close", help="set an entry status to closed (or --status)")
+    mem_close.add_argument("id")
+    mem_close.add_argument("--status")
+    mem_delete = mem_sub.add_parser("delete", help="remove an entry block")
+    mem_delete.add_argument("id")
+    mem_delete.add_argument("--yes", action="store_true")
+    mem_prune = mem_sub.add_parser("prune", help="delete monthly history files older than N months")
+    mem_prune.add_argument("--older-than-months", type=int, required=True)
+    mem_prune.add_argument("--include-archive", action="store_true")
+    mem_prune.add_argument("--dry-run", action="store_true")
+    for parser, fn in ((mem_add, cmd_memory_add), (mem_get, cmd_memory_get),
+                       (mem_list, cmd_memory_list), (mem_update, cmd_memory_update),
+                       (mem_close, cmd_memory_close), (mem_delete, cmd_memory_delete),
+                       (mem_prune, cmd_memory_prune)):
+        parser.add_argument("--path", default=".")
+        parser.add_argument("--json", action="store_true")
+        parser.set_defaults(fn=fn)
 
     ses = sub.add_parser(
         "session",
