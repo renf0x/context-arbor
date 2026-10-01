@@ -27,6 +27,27 @@ Karpathy-inspired development guidance is encoded in task fields and kept in an 
 note. It does not add the upstream skill body to every agent prompt. The integration favors
 observable success, explicit uncertainty, small scope and verification.
 
-Session state lives in `.arbor/session-state.md`. Claude hooks may snapshot it before native
-compaction and restore it afterwards. No billing collector, read gate, repository digest,
-message translator or external model dependency is part of the design.
+Session state lives in `.arbor/session-state.md`. Claude hooks snapshot it before the context
+is dropped (`PreCompact`, and `SessionEnd` for any reason) and restore it, with the open task from
+`NOW.md`, in the next context. The desktop app's clear starts a new session (`startup`) without
+`SessionEnd`, so `restore` snapshots the project's previous transcript itself when it is newer
+than the state (and under 12 h old). Model-based compaction is the costly path: `/compact` and
+auto-compact re-read the whole context and write a summary, while `/clear` makes no model call.
+`session compaction --mode` therefore lets a project block the former through the documented
+`PreCompact` exit code, and the gauge and adapters point to `/clear`. The default is off.
+
+Every turn re-sends the whole context, so what a session spends grows with turns times context
+size (`memory/investigations.md`, INV-20260929-003). Arbor cannot change how the agent shell
+caches; it can shrink what is multiplied. `arbor code map|find|outline|show|refs` answers "where
+is X" from a stat-refreshed symbol table (`.arbor/code-index.json`; Python via `ast`, other
+languages via line rules), returning one bounded slice instead of a whole file. It is a digest
+the agent asks for, not a read gate -- nothing blocks a normal read -- and it replaces the
+earlier "no repository digest" boundary (DEC-20260929-005).
+
+`arbor stats` reads usage counts from the local Claude Code transcripts and reports them; prices
+are supplied by the user, never bundled. `arbor ui` renders vault, git history and those counts
+as one static HTML page with no model, server or external resource (DEC-20260929-007). Both
+measure; neither claims a saving.
+
+No billing collector, read gate, message translator or external model dependency is part of the
+design.

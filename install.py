@@ -145,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
     print('  Search memory: python arbor.py memory query "question"')
     print("  Open Obsidian: python arbor.py memory open")
     print('  Save session: python arbor.py session save --note "current state"')
+    print('  Find code: python arbor.py code map | code find "topic"')
+    print("  Chronicle: python arbor.py ui --open")
     return 0
 
 

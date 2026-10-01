@@ -9,3 +9,7 @@ dist/
 build/
 *.egg-info/
 .pytest_cache/
+
+# benchmark scratch (raw model transcripts)
+bench/_raw/
+bench/results/*.bak

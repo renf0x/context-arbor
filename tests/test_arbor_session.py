@@ -108,7 +108,9 @@ class SessionTests(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(ctx.cmd_session_gauge(self.gauge_args(p)), 0)
         self.assertIn("[arbor gauge]", out.getvalue())
-        self.assertIn("compact NOW", out.getvalue())
+        self.assertIn("clear NOW", out.getvalue())
+        self.assertIn("/clear", out.getvalue())
+        self.assertNotIn("recommend /compact", out.getvalue())
 
     def test_gauge_uses_last_main_chain_usage(self):
         p = self.write_transcript([
@@ -118,6 +120,124 @@ class SessionTests(unittest.TestCase):
                 "cache_read_input_tokens": 100}}},
         ])
         self.assertEqual(ctx._last_context_tokens(p), 130_000)
+
+    def turns(self, *sizes, name="t.jsonl"):
+        """A transcript whose main-chain assistant turns have these total context sizes."""
+        return self.write_transcript([
+            {"type": "assistant", "message": {"role": "assistant", "usage": {
+                "input_tokens": 10, "cache_read_input_tokens": size - 10}}}
+            for size in sizes], name=name)
+
+    def run_hook(self, fn, transcript, **event):
+        sys.stdin = io.StringIO(json.dumps({"transcript_path": str(transcript), **event}))
+        out = io.StringIO()
+        args = argparse.Namespace(transcript=None, warn_tokens=None, crit_tokens=None,
+                                  warn_growth=None, crit_growth=None, stop_growth=None)
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(fn(args), 0)
+        return out.getvalue()
+
+    def test_gauge_thresholds_are_growth_over_the_first_turn(self):
+        quiet = self.turns(65_000, 90_000)          # +25k: a big prefix alone is not a reason
+        self.assertEqual(self.run_hook(ctx.cmd_session_gauge, quiet), "")
+        soon = self.turns(65_000, 130_000, name="soon.jsonl")   # +65k
+        text = self.run_hook(ctx.cmd_session_gauge, soon)
+        self.assertIn("clear soon", text)
+        self.assertIn("+65k since the session started", text)
+        now = self.turns(65_000, 200_000, name="now.jsonl")     # +135k
+        self.assertIn("clear NOW", self.run_hook(ctx.cmd_session_gauge, now))
+
+    def test_guard_speaks_once_per_level_and_stays_silent_before_a_threshold(self):
+        p = self.turns(65_000, 70_000)
+        self.assertEqual(self.run_hook(ctx.cmd_session_guard, p, session_id="s1"), "")
+        p = self.turns(65_000, 140_000, name="warn.jsonl")      # +75k -> level 1
+        first = json.loads(self.run_hook(ctx.cmd_session_guard, p, session_id="s1"))
+        note = first["hookSpecificOutput"]
+        self.assertEqual(note["hookEventName"], "PreToolUse")
+        self.assertIn("at the next break", note["additionalContext"])
+        self.assertNotIn("permissionDecision", note)
+        self.assertEqual(self.run_hook(ctx.cmd_session_guard, p, session_id="s1"), "")  # same level
+        p = self.turns(65_000, 200_000, name="crit.jsonl")      # +135k -> level 2
+        second = json.loads(self.run_hook(ctx.cmd_session_guard, p, session_id="s1"))
+        self.assertIn("/clear NOW", second["hookSpecificOutput"]["additionalContext"])
+        again = self.run_hook(ctx.cmd_session_guard, self.turns(65_000, 70_000, name="reset.jsonl"),
+                              session_id="s1")               # after a /clear the level resets
+        self.assertEqual(again, "")
+        self.assertIn("at the next break", self.run_hook(
+            ctx.cmd_session_guard, p.with_name("warn.jsonl"), session_id="s1"))
+
+    def test_guard_hard_stop_is_opt_in_and_still_allows_arbor_session_commands(self):
+        p = self.turns(65_000, 300_000)
+        self.assertNotIn("permissionDecision",
+                         self.run_hook(ctx.cmd_session_guard, p, session_id="a", tool_name="Bash",
+                                       tool_input={"command": "ls"}))       # default: never blocks
+        args = argparse.Namespace(path=".", warn_growth=None, crit_growth=None, stop_growth=150_000)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ctx.cmd_session_limit(args), 0)
+        denied = json.loads(self.run_hook(ctx.cmd_session_guard, p, session_id="a", tool_name="Read",
+                                          tool_input={"file_path": "x.py"}))["hookSpecificOutput"]
+        self.assertEqual(denied["permissionDecision"], "deny")
+        self.assertIn("/clear", denied["permissionDecisionReason"])
+        self.assertIn("+235k", denied["permissionDecisionReason"])
+        for command in ("python arbor.py session save --note x", "cd \"/d/My Proj\" && python3 arbor.py memory query q"):
+            self.assertEqual(self.run_hook(ctx.cmd_session_guard, p, session_id="a", tool_name="Bash",
+                                           tool_input={"command": command}), "")
+        blocked = self.run_hook(ctx.cmd_session_guard, p, session_id="a", tool_name="Bash",
+                                tool_input={"command": "python arbor.py code find x && rm -rf ."})
+        self.assertIn("deny", blocked)      # only session|memory commands pass, and only as a prefix
+        below = self.turns(65_000, 120_000, name="below.jsonl")
+        self.assertNotIn("deny", self.run_hook(ctx.cmd_session_guard, below, session_id="b",
+                                               tool_name="Read", tool_input={}))
+
+    def test_guard_never_breaks_on_a_missing_or_broken_transcript(self):
+        args = argparse.Namespace(transcript=None, warn_tokens=None, crit_tokens=None,
+                                  warn_growth=None, crit_growth=None, stop_growth=None)
+        for event in ({}, {"transcript_path": "no-such-file.jsonl"}):
+            sys.stdin = io.StringIO(json.dumps(event))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(ctx.cmd_session_guard(args), 0)
+            self.assertEqual(out.getvalue(), "")
+        Path("junk.jsonl").write_text("not json\n{]\n", encoding="utf-8")
+        self.assertEqual(self.run_hook(ctx.cmd_session_guard, Path("junk.jsonl")), "")
+
+    def test_limit_command_shows_and_persists_thresholds(self):
+        def limit(**values):
+            args = argparse.Namespace(path=".", warn_growth=None, crit_growth=None, stop_growth=None)
+            vars(args).update(values)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(ctx.cmd_session_limit(args), 0)
+            return out.getvalue()
+        self.assertIn("warn +60k, clear-now +120k, hard stop off", limit())
+        self.assertIn("warn +40k", limit(warn_growth=40_000))
+        self.assertIn("warn +40k, clear-now +120k, hard stop +200k", limit(stop_growth=200_000))
+        self.assertEqual(json.loads(Path(".arbor/config.json").read_text(encoding="utf-8"))["context"],
+                         {"warn_growth": 40_000, "stop_growth": 200_000})
+
+    def test_guard_hook_is_installed_only_by_a_hard_stop_and_removed_with_it(self):
+        settings = Path(".claude/settings.local.json")
+        ctx._merge_claude_local_settings(settings)      # what `init` does
+        self.assertNotIn("PreToolUse", json.loads(settings.read_text(encoding="utf-8"))["hooks"])
+
+        def limit(stop):
+            out = io.StringIO()
+            args = argparse.Namespace(path=".", warn_growth=None, crit_growth=None, stop_growth=stop)
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(ctx.cmd_session_limit(args), 0)
+            return out.getvalue()
+
+        self.assertIn("hook: installed", limit(200_000))
+        self.assertIn("hook: already installed", limit(250_000))
+        hooks = json.loads(settings.read_text(encoding="utf-8"))["hooks"]
+        self.assertEqual([h["command"] for g in hooks["PreToolUse"] for h in g["hooks"]],
+                         [ctx.GUARD_HOOK_COMMAND])
+        self.assertIn("UserPromptSubmit", hooks)         # the other hooks are untouched
+        self.assertIn("hook: removed", limit(0))
+        hooks = json.loads(settings.read_text(encoding="utf-8"))["hooks"]
+        self.assertNotIn("PreToolUse", hooks)
+        self.assertIn("SessionStart", hooks)
+        self.assertNotIn("PreToolUse", json.loads(settings.read_text(encoding="utf-8"))["hooks"])
 
     def test_restore_prints_state_and_skips_stale_startup(self):
         ctx._state_write(agent="resume here", auto=None)

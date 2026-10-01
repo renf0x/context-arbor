@@ -5,7 +5,7 @@
 ## Project
 
 - Goal: Agent-neutral local project memory, Obsidian integration and session continuity.
-- Current state: Hot/warm/cold memory rings with sparse cross-links.
+- Current state: Hot/warm/cold memory rings with sparse cross-links, a local code index, a /clear-based session flow and a static chronicle page.
 - Primary stack: Python standard library and Markdown.
 
 ## Start Here

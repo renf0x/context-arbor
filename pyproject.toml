@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "context-arbor"
-version = "0.4.0"
+version = "0.5.0"
 description = "Context Arbor: local linked project memory and session continuity for coding agents."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,8 +16,8 @@ keywords = ["agents", "memory", "sessions", "obsidian", "context"]
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/renf0x/cacp"
-Repository = "https://github.com/renf0x/cacp"
+Homepage = "https://github.com/renf0x/context-arbor"
+Repository = "https://github.com/renf0x/context-arbor"
 
 # Installs the global `arbor` command. A local `arbor.py` copy dropped by
 # install.py still takes priority when present.

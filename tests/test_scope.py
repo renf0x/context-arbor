@@ -40,7 +40,8 @@ class ScopeTests(unittest.TestCase):
             self.assertEqual(ctx.main(['init', temp]), 0)
             settings = json.loads((root / '.claude/settings.local.json').read_text())
             self.assertIs(settings['autoMemoryEnabled'], False)
-            self.assertEqual(set(settings['hooks']), {'UserPromptSubmit', 'PreCompact', 'SessionStart'})
+            self.assertEqual(set(settings['hooks']),
+                             {'UserPromptSubmit', 'PreCompact', 'SessionStart', 'SessionEnd'})
             self.assertFalse((root / '.arbor').exists())
 
     def test_init_migrates_untouched_legacy_generic_context(self):
@@ -87,7 +88,7 @@ class ScopeTests(unittest.TestCase):
             self.assertIs(data['autoMemoryEnabled'], False)
             self.assertEqual(data['permissions'], {'allow': ['Read']})
             self.assertEqual(set(data['hooks']),
-                             {'UserPromptSubmit', 'PreCompact', 'SessionStart'})
+                             {'UserPromptSubmit', 'PreCompact', 'SessionStart', 'SessionEnd'})
 
     def test_memory_query_does_not_fall_back_to_project_files(self):
         with tempfile.TemporaryDirectory() as temp:

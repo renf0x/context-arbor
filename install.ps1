@@ -1,6 +1,6 @@
 # Context Arbor one-line installer (Windows PowerShell).
 #
-#   irm https://raw.githubusercontent.com/renf0x/cacp/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/renf0x/context-arbor/main/install.ps1 | iex
 #
 # Downloads the self-contained arbor.py and scaffolds memory and agent adapters.
 #
@@ -14,7 +14,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$raw = "https://raw.githubusercontent.com/renf0x/cacp/main/arbor.py"
+$raw = "https://raw.githubusercontent.com/renf0x/context-arbor/main/arbor.py"
 
 $py = (Get-Command python -ErrorAction SilentlyContinue).Source
 if (-not $py) { $py = (Get-Command py -ErrorAction SilentlyContinue).Source }

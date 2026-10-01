@@ -172,6 +172,44 @@ class MemoryTests(unittest.TestCase):
         self.assertNotIn("TASK-1", now.read_text(encoding="utf-8"))
         self.assertIn("TASK-2", now.read_text(encoding="utf-8"))
 
+    def test_rotate_folds_long_open_tasks_out_of_an_oversized_hot_ring(self):
+        self.init_memory()
+        now = self.root / "memory" / "NOW.md"
+        long_body = "\n".join(f"- Step {i}: uniquefoldpayload{i} " + "x" * 120 for i in range(60))
+        now.write_text(
+            "# Now\n\n> header kept\n\n"
+            f"## TASK-20260101-001 Big open task\n\n- Status: active\n- Goal: ship it\n{long_body}\n\n"
+            "## TASK-20260101-002 Small task\n\n- Status: next\n- Goal: tiny\n\n"
+            "## Feature asks\n\n- user wants a pony\n",
+            encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ctx.cmd_memory_rotate(argparse.Namespace(path=str(self.root))), 0)
+        hot = now.read_text(encoding="utf-8")
+        self.assertLessEqual(ctx.est_tokens(hot), ctx.NOW_MAX_TOKENS)
+        for kept in ("> header kept", "## TASK-20260101-001 Big open task", "- Status: active",
+                     "- Goal: ship it", "[[tasks/TASK-20260101-001]]", "## TASK-20260101-002 Small task",
+                     "- Goal: tiny", "user wants a pony"):
+            self.assertIn(kept, hot)
+        self.assertNotIn("uniquefoldpayload", hot)
+        details = (self.root / "memory" / "tasks" / "TASK-20260101-001.md").read_text(encoding="utf-8")
+        self.assertTrue(details.startswith("# TASK-20260101-001 Big open task"))
+        self.assertIn("uniquefoldpayload59", details)          # nothing is lost
+        self.assertEqual([i["code"] for i in ctx.memory_check(self.root) if "NOW" in i["path"]
+                          or i["code"] == "broken-link"], [])
+        self.assertTrue(ctx._retrieve(self.root, "uniquefoldpayload7", 5, True))  # still searchable
+        before = hot
+        with contextlib.redirect_stdout(io.StringIO()):
+            ctx.cmd_memory_rotate(argparse.Namespace(path=str(self.root)))
+        self.assertEqual(now.read_text(encoding="utf-8"), before)  # a second rotate changes nothing
+
+    def test_query_without_hits_in_another_script_suggests_the_notes_language(self):
+        self.init_memory()
+        out = io.StringIO()
+        args = argparse.Namespace(path=str(self.root), question="автосейв срабатывает", top=5, json=False)
+        with contextlib.redirect_stdout(out):
+            ctx.cmd_memory_query(args)
+        self.assertIn("retry with keywords in that language", out.getvalue())
+
 
     def test_query_returns_local_topk_without_llm(self):
         self.init_memory()

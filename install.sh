@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Context Arbor one-line installer (macOS / Linux / WSL / Git Bash).
 #
-#   curl -fsSL https://raw.githubusercontent.com/renf0x/cacp/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/renf0x/context-arbor/main/install.sh | bash
 #
 # Downloads arbor.py and scaffolds memory and agent adapters.
 set -euo pipefail
 
-RAW="https://raw.githubusercontent.com/renf0x/cacp/main/arbor.py"
+RAW="https://raw.githubusercontent.com/renf0x/context-arbor/main/arbor.py"
 TARGET="${1:-.}"
 AGENTS="${ARBOR_AGENTS:-all}"
 

@@ -1,5 +1,31 @@
 # Memory Changelog
 
+## 2026-10-01 — Session hooks for the desktop app, opt-in Jev, served UI
+
+- Session hooks now fire in the desktop app, whose clear opens a new `startup` session with
+  no `SessionEnd(clear)`: restore snapshots the previous transcript itself; matchers widened.
+- Added opt-in Jev (`arbor jev key|on|off|status|ask|hook`): a UserPromptSubmit hook asks an
+  OpenRouter model which vault notes bear on the prompt and injects up to two. The key is
+  stored encrypted per OS user (DPAPI / Keychain / Secret Service), never in the project
+  (DEC-20261001-008, INV-20261001-004).
+- `arbor ui --serve`: the chronicle on 127.0.0.1 with a Jev form (token, Host and Origin checks).
+- Installers and package metadata point at the renamed repo renf0x/context-arbor.
+
+## 2026-09-29 — Code index, /clear flow and chronicle page (v0.5.0)
+
+- Added `arbor code index|map|find|outline|show|refs`: a stat-refreshed symbol table so an
+  agent asks for one function or a project map instead of reading whole files
+  (DEC-20260929-005). Lifts the old "no repository digest" line in docs/design.md.
+- Replaced the neural /compact path: SessionEnd(clear) snapshots, SessionStart restores the
+  state and the open task, `session compaction --mode` blocks /compact and auto-compact through
+  the PreCompact hook, and the gauge now suggests /clear (DEC-20260929-006).
+- Added `arbor stats` (token usage from local Claude Code transcripts, optional user-set
+  prices) and `arbor ui` (static chronicle page: activity chart, memory rings, relation arcs,
+  tokens). The first cut used a decorative tree-ring picture that could not be read; it was
+  replaced by a labelled bar chart (DEC-20260929-007).
+- Adapter blocks gained two lines; untouched stock blocks of v0.3/v0.4 are upgraded by
+  `arbor init`, edited ones are kept.
+
 ## 2026-09-14 — architecture.md gets a real cap and an update trigger
 
 - `memory/architecture.md` had no size limit, no update trigger and no instruction telling

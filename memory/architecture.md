@@ -4,16 +4,11 @@
 > Update or re-read only when the stack changes, or on request. Cap ~400 tokens
 > (see [[development]]).
 
-- Language/runtime: Python 3.10+, standard library only, no third-party dependency.
-- Single entry point: `arbor.py` (commands: `init`, `memory`, `session`).
-- Memory: Markdown vault in `memory/`, three time rings -- hot (`NOW.md`), warm
-  (rules/architecture/decisions/bugs/investigations), cold (`archive/`, excluded from
-  retrieval). See [[decisions#DEC-20260914-001 Context Arbor memory topology]].
-- Entries (TASK/BUG/DEC/INV) may carry typed `Relations:` edges to other entry IDs;
-  `memory trace <ID>` walks them locally, no model. See
-  [[decisions#DEC-20260914-003 Typed Relations field and local trace]].
-- Retrieval (`memory query`): local lexical top-k, no model/network, excludes
-  templates/archive, weights the hot ring and `links.md` anchors above general matches.
-- Session state: `.arbor/session-state.md`; Claude Code hooks snapshot/restore it around
-  native compaction (`session gauge/snapshot/restore`).
-- Agent adapters point to `NOW.md` and search on demand; the vault is never loaded in full.
+- Runtime: Python 3.10+, standard library only. One file, `arbor.py`: init, memory, code, session, stats, ui.
+- Memory: Markdown vault `memory/`; hot `NOW.md`, warm rules/architecture/journals, cold `archive/` (never retrieved). [[decisions#DEC-20260914-001 Context Arbor memory topology]]
+- Entries (TASK/BUG/DEC/INV) may carry typed `Relations:`; `memory trace` walks them. [[decisions#DEC-20260914-003 Typed Relations field and local trace]]
+- `memory query`: lexical top-k, hot ring and `links.md` weighted, no model.
+- Code index `.arbor/code-index.json`, stat-refreshed (Python `ast`, line rules elsewhere): `code map|find|outline|show|refs`. [[decisions#DEC-20260929-005 Code index instead of whole-file reads]]
+- Session state `.arbor/session-state.md`; hooks: gauge, snapshot (PreCompact, SessionEnd clear), restore, compact-guard (opt-in block). [[decisions#DEC-20260929-006 /clear replaces /compact]]
+- `stats` reads Claude Code transcripts (usage only); `ui` writes static `.arbor/ui/index.html`, no server. [[decisions#DEC-20260929-007 Static chronicle page]]
+- Adapters point to `NOW.md` and on-demand commands; the vault is never loaded whole.
