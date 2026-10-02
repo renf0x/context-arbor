@@ -59,58 +59,31 @@ class CompactionTestCase(unittest.TestCase):
 
 
 class CompactGuardTests(CompactionTestCase):
-    def test_off_is_the_default_and_never_blocks(self):
-        code, err = self.hook("manual", "off")
-        self.assertEqual((code, err), (0, ""))
-        self.assertFalse(ctx.SESSION_STATE_PATH.exists())
-        Path(".arbor/config.json").unlink()
-        sys.stdin = io.StringIO("")
-        self.assertEqual(ctx.cmd_session_compact_guard(argparse.Namespace(trigger="auto")), 0)
+    """DEC-20261002-001: compaction is never blocked. The v0.5 guard survives as a no-op so
+    settings written by v0.5 still parse (exit 2 from a PreCompact hook would block)."""
 
-    def test_manual_mode_blocks_slash_compact_but_lets_auto_compaction_run(self):
-        code, err = self.hook("manual", "manual")
-        self.assertEqual(code, 2)
-        self.assertIn("/clear", err)
-        self.assertEqual(self.hook("auto", "manual")[0], 0)
+    def test_the_retired_guard_never_blocks_whatever_an_old_config_says(self):
+        for mode in ("off", "manual", "all"):
+            for trigger in ("manual", "auto"):
+                self.assertEqual(self.hook(trigger, mode), (0, ""))
+        self.assertEqual(self.hook("manual", "all", with_event=False), (0, ""))
+        self.assertFalse(ctx.SESSION_STATE_PATH.exists())  # saving is the snapshot hook's job
 
-    def test_all_mode_blocks_both_triggers(self):
-        self.assertEqual(self.hook("manual", "all")[0], 2)
-        self.assertEqual(self.hook("auto", "all")[0], 2)
-
-    def test_a_blocked_compaction_still_saves_the_session_first(self):
-        self.hook("manual", "all")
-        state = ctx._state_sections_read()["Auto snapshot"]
-        self.assertIn("add the chronicle page", state)
-        self.assertIn("ui.py", state)
-
-    def test_a_broken_config_or_missing_event_never_wedges_the_hook(self):
-        Path(".arbor").mkdir()
-        Path(".arbor/config.json").write_text("{broken", encoding="utf-8")
-        self.assertEqual(ctx.cmd_session_compact_guard(argparse.Namespace(trigger="manual")), 0)
-        code, err = self.hook("manual", "all", with_event=False)
-        self.assertEqual(code, 2)  # still blocks; there was just nothing to snapshot
-
-    def test_compaction_command_sets_reports_and_rejects_modes(self):
+    def test_compaction_command_recommends_a_window_and_ignores_old_modes(self):
+        ctx._config_write(Path("."), {"prices": {"input": 1}})
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(ctx.main(["session", "compaction"]), 0)
             self.assertEqual(ctx.main(["session", "compaction", "--mode", "all"]), 0)
-            self.assertEqual(ctx.main(["session", "compaction"]), 0)
-        self.assertIn("guard: off", out.getvalue())
-        self.assertIn("guard: all", out.getvalue())
-        self.assertEqual(ctx._config_read(Path("."))["compaction"], "all")
+        self.assertIn("/autocompact 200k", out.getvalue())
+        self.assertIn("--mode all is ignored", out.getvalue())
+        self.assertEqual(ctx._config_read(Path(".")), {"prices": {"input": 1}})
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             ctx.main(["session", "compaction", "--mode", "sometimes"])
 
-    def test_compaction_setting_keeps_other_config(self):
-        ctx._config_write(Path("."), {"prices": {"input": 1}})
-        with contextlib.redirect_stdout(io.StringIO()):
-            ctx.main(["session", "compaction", "--mode", "manual"])
-        self.assertEqual(ctx._config_read(Path("."))["prices"], {"input": 1})
-
 
 class HookRegistrationTests(CompactionTestCase):
-    def test_init_registers_clear_snapshot_and_both_compaction_guards(self):
+    def test_init_registers_the_session_hooks_and_no_compaction_guard(self):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(ctx.main(["init", ".", "--agents", "claude"]), 0)
         hooks = json.loads(Path(".claude/settings.local.json").read_text(encoding="utf-8"))["hooks"]
@@ -118,10 +91,23 @@ class HookRegistrationTests(CompactionTestCase):
         self.assertNotIn("matcher", end[0])  # every way a session ends, not only /clear
         self.assertEqual(end[0]["hooks"][0]["command"], ctx._hook_command("session snapshot"))
         self.assertIn("startup", hooks["SessionStart"][0]["matcher"])  # the desktop app's clear
-        pre = {g.get("matcher"): g["hooks"][0]["command"] for g in hooks["PreCompact"]}
-        self.assertEqual(pre["manual"], ctx._hook_command("session compact-guard --trigger manual"))
-        self.assertEqual(pre["auto"], ctx._hook_command("session compact-guard --trigger auto"))
-        self.assertEqual(pre[None], ctx._hook_command("session snapshot"))
+        pre = [h["command"] for g in hooks["PreCompact"] for h in g["hooks"]]
+        self.assertEqual(pre, [ctx._hook_command("session snapshot")])  # saves, never blocks
+
+    def test_init_removes_the_compaction_guard_v05_installed_and_keeps_user_hooks(self):
+        path = Path(".claude/settings.local.json")
+        path.parent.mkdir()
+        guard = lambda trigger: {"matcher": trigger, "hooks": [{"type": "command", "command":
+                                 ctx._hook_command(f"session compact-guard --trigger {trigger}")}]}
+        snap = ctx._hook_command("session snapshot")
+        path.write_text(json.dumps({"hooks": {"PreCompact": [
+            {"hooks": [{"type": "command", "command": snap}]}, guard("manual"), guard("auto"),
+            {"hooks": [{"type": "command", "command": "python mine.py"}]}]}}), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ctx.main(["init", ".", "--agents", "claude"]), 0)
+        pre = json.loads(path.read_text(encoding="utf-8"))["hooks"]["PreCompact"]
+        self.assertEqual([h["command"] for g in pre for h in g["hooks"]], [snap, "python mine.py"])
+        self.assertEqual(ctx._merge_claude_local_settings(path), "kept")
 
     def test_an_older_install_gains_the_new_hooks_and_keeps_user_hooks(self):
         path = Path(".claude/settings.local.json")
@@ -202,8 +188,8 @@ class HookCommandShellTests(CompactionTestCase):
     def test_hook_keeps_the_exit_code_of_arbor_py(self):
         project = self.root / "p"
         project.mkdir()
-        (project / "arbor.py").write_text("raise SystemExit(2)\n", encoding="utf-8")  # e.g. compact-guard blocking
-        self.assertEqual(self.run_hook("session compact-guard --trigger manual", project, project).returncode, 2)
+        (project / "arbor.py").write_text("raise SystemExit(2)\n", encoding="utf-8")  # e.g. a hook that blocks
+        self.assertEqual(self.run_hook("session guard", project, project).returncode, 2)
 
 
 class RestoreAfterClearTests(CompactionTestCase):

@@ -6,15 +6,39 @@ from pathlib import Path
 import arbor as ctx
 
 
+# The adapter lines v0.5.0 shipped, verbatim; v0.4.0 had the same minus the code and /clear lines.
+V050_CLEAR_LINE = ("Suggest `/clear`, not `/compact` (compaction is a model call); saved state comes "
+                   "back on its own.")
+V050_LINES = (
+    "When prior project context is needed, read `memory/NOW.md` first and follow links on demand.",
+    'Search durable notes with `python arbor.py memory query "question"`; do not scan the vault.',
+    ctx._CODE_ADAPTER_LINE,
+    "Keep only the active task in `memory/NOW.md`; store durable outcomes in linked notes.",
+    ctx._ARCHITECTURE_ADAPTER_LINE,
+    "Preserve user rules. Update their checksum only after explicit user approval.",
+    'Before clearing context, save useful state with `python arbor.py session save --note "..."`.',
+    V050_CLEAR_LINE,
+    "Use `python arbor.py session restore` to recover it. Treat restored notes as potentially stale.",
+    "Open the vault with `python arbor.py memory open`. Context Arbor invokes no model.",
+)
+V040_LINES = tuple(line for line in V050_LINES if line not in (ctx._CODE_ADAPTER_LINE, V050_CLEAR_LINE))
+
+
+def block(lines) -> str:
+    return (ctx.MANAGED_START + "\n# Context Arbor: memory and sessions\n\n" + "\n".join(lines)
+            + "\n\n" + ctx.MANAGED_END + "\n")
+
+
+def context(lines) -> str:
+    return "# Context Arbor: memory and sessions\n\n" + "\n".join(lines) + "\n"
+
+
 def v040_block() -> str:
-    """The managed block v0.4.0 shipped: today's block minus the two lines added in v0.5."""
-    return (ctx.ADAPTER_CLAUDE.replace(ctx._CODE_ADAPTER_LINE + "\n", "")
-            .replace(ctx._CLEAR_ADAPTER_LINE + "\n", ""))
+    return block(V040_LINES)
 
 
 def v040_context() -> str:
-    return (ctx.AGENT_CONTEXT_MD.replace(ctx._CODE_ADAPTER_LINE + "\n", "")
-            .replace(ctx._CLEAR_ADAPTER_LINE + "\n", ""))
+    return context(V040_LINES)
 
 
 class AdapterUpgradeTests(unittest.TestCase):
@@ -22,22 +46,25 @@ class AdapterUpgradeTests(unittest.TestCase):
         self.dir = Path(tempfile.mkdtemp())
 
     def test_known_hashes_really_match_the_shipped_texts(self):
-        block = hashlib.sha256(v040_block().strip().encode("utf-8")).hexdigest()
-        self.assertIn(block, ctx.PREVIOUS_MANAGED_BLOCK_SHA256)
-        context = hashlib.sha256(v040_context().encode("utf-8")).hexdigest()
-        self.assertIn(context, ctx.PREVIOUS_AGENT_CONTEXT_SHA256)
+        for lines in (V040_LINES, V050_LINES):
+            digest = hashlib.sha256(block(lines).strip().encode("utf-8")).hexdigest()
+            self.assertIn(digest, ctx.PREVIOUS_MANAGED_BLOCK_SHA256)
+            digest = hashlib.sha256(context(lines).encode("utf-8")).hexdigest()
+            self.assertIn(digest, ctx.PREVIOUS_AGENT_CONTEXT_SHA256)
 
     def test_an_untouched_previous_block_is_upgraded_in_place(self):
-        path = self.dir / "CLAUDE.md"
-        path.write_text("# Mine\n\n" + v040_block().strip() + "\n\n# Tail\n", encoding="utf-8")
-        self.assertEqual(ctx._append_managed_block(path, ctx.ADAPTER_CLAUDE), "upgraded")
-        text = path.read_text(encoding="utf-8")
-        self.assertIn("code map", text)
-        self.assertIn("/clear", text)
-        self.assertTrue(text.startswith("# Mine\n\n"))
-        self.assertTrue(text.endswith("\n\n# Tail\n"))
-        self.assertEqual(text.count(ctx.MANAGED_START), 1)
-        self.assertEqual(ctx._append_managed_block(path, ctx.ADAPTER_CLAUDE), "kept")
+        for lines in (V040_LINES, V050_LINES):
+            path = self.dir / "CLAUDE.md"
+            path.write_text("# Mine\n\n" + block(lines).strip() + "\n\n# Tail\n", encoding="utf-8")
+            self.assertEqual(ctx._append_managed_block(path, ctx.ADAPTER_CLAUDE), "upgraded")
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("code map", text)
+            self.assertIn("/autocompact 200k", text)
+            self.assertNotIn(V050_CLEAR_LINE, text)
+            self.assertTrue(text.startswith("# Mine\n\n"))
+            self.assertTrue(text.endswith("\n\n# Tail\n"))
+            self.assertEqual(text.count(ctx.MANAGED_START), 1)
+            self.assertEqual(ctx._append_managed_block(path, ctx.ADAPTER_CLAUDE), "kept")
 
     def test_a_block_the_user_edited_is_left_alone(self):
         path = self.dir / "CLAUDE.md"

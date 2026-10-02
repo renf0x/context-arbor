@@ -31,10 +31,14 @@ Session state lives in `.arbor/session-state.md`. Claude hooks snapshot it befor
 is dropped (`PreCompact`, and `SessionEnd` for any reason) and restore it, with the open task from
 `NOW.md`, in the next context. The desktop app's clear starts a new session (`startup`) without
 `SessionEnd`, so `restore` snapshots the project's previous transcript itself when it is newer
-than the state (and under 12 h old). Model-based compaction is the costly path: `/compact` and
-auto-compact re-read the whole context and write a summary, while `/clear` makes no model call.
-`session compaction --mode` therefore lets a project block the former through the documented
-`PreCompact` exit code, and the gauge and adapters point to `/clear`. The default is off.
+than the state (and under 12 h old). Compaction, not `/clear`, is the long-session path
+(DEC-20261002-001): few people restart a session every few tasks, and replaying real transcripts
+(`stats --simulate-compact`) showed that auto-compaction at a fixed ~200k window costs 0.85x of
+what was recorded, while late compaction (the ~967k default of 1M models) costs 2.00x. So Arbor
+never blocks compaction (v0.5's `PreCompact` guard is a no-op that `init` removes); the adapters
+ask for `/autocompact 200k` (Codex: `model_auto_compact_token_limit`) and tell the summary what to
+keep; the gauge and the opt-in guard ask for `/compact` once the context outgrows that window, and
+read the live size as reset right after a compaction, until the next turn reports the new one.
 
 Every turn re-sends the whole context, so what a session spends grows with turns times context
 size (`memory/investigations.md`, INV-20260929-003). Arbor cannot change how the agent shell

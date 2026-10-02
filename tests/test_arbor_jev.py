@@ -211,5 +211,218 @@ class ServerTest(JevBase):
         self.assertIn("Key stored encrypted.", page)
 
 
+ASK_DECISION = """
+## DEC-20260905-003 Retry limit of the label printer is 5
+
+- Status: active
+- Date: 2026-09-05
+- Decision: Raise the retry limit to 5.
+- Relations: caused-by:BUG-20260801-002
+"""
+
+ARCHIVED_BUG = """# Bugs 2026
+
+## BUG-20260801-002 Label printer drops jobs under load
+
+- Status: closed
+- Date: 2026-08-01
+- Cause: Retry limit 2 was too low.
+"""
+
+QUESTION = "почему поменяли лимит повторов принтера"
+
+
+class FakeJev:
+    """Stands in for `_jev_call`: probabilities from substrings of each instruction."""
+
+    def __init__(self, scores, cost=0.0001):
+        self.scores, self.cost, self.calls = scores, cost, []
+        self.lock = threading.Lock()
+
+    def __call__(self, request, instructions, criteria, key, config):
+        with self.lock:
+            self.calls.append((request, list(instructions), criteria))
+        probs = [next((p for needle, p in self.scores if needle in text), 0.05) for text in instructions]
+        return probs, self.cost
+
+
+class AskBase(JevBase):
+    def setUp(self):
+        super().setUp()
+        memory = self.root / "memory"
+        with (memory / "decisions.md").open("a", encoding="utf-8") as fh:
+            fh.write(ASK_DECISION)
+        (memory / "archive").mkdir()
+        (memory / "archive" / "bugs-2026.md").write_text(ARCHIVED_BUG, encoding="utf-8")
+        (memory / "templates").mkdir()
+        (memory / "templates" / "decision.md").write_text("## DEC-20260101-001 Never asked\n", encoding="utf-8")
+        (memory / "MEMORY.md").write_text("# Index\n\n## Notes\n\n- decisions.md\n", encoding="utf-8")
+        (memory / "NOW.md").write_text("# Now\n\n## TASK-YYYYMMDD-NNN Short title\n\n- Status: open\n",
+                                       encoding="utf-8")
+        ctx.jev_enable(self.root, True)
+        patcher = mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": KEY})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def log(self):
+        path = self.root / ctx.JEV_LOG_PATH
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.is_file() else []
+
+    def cli(self, question, **flags):
+        args = argparse.Namespace(jev_cmd="ask", path=str(self.root), question=question, code=False,
+                                  show=False, top=5, dir=None, json=False)
+        for name, value in flags.items():
+            setattr(args, name, value)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = ctx.cmd_jev(args)
+        return code, out.getvalue()
+
+
+class DecideTest(AskBase):
+    def test_questions_go_in_chunks_answers_keep_their_order_and_costs_add_up(self):
+        sizes = []
+
+        def call(request, instructions, criteria, key, config):
+            sizes.append(len(instructions))
+            return [int(text[1:]) / 1000 for text in instructions], 0.0001
+
+        with mock.patch.object(ctx, "_jev_call", side_effect=call):
+            probs, cost, requests = ctx._jev_decide("r", [f"q{i}" for i in range(130)], {}, KEY,
+                                                    {"model": "m", "timeout": 1})
+        self.assertEqual(requests, 3)
+        self.assertEqual(sorted(sizes), [10, 60, 60])
+        self.assertEqual(probs, [i / 1000 for i in range(130)])
+        self.assertAlmostEqual(cost, 0.0003)
+
+
+class AskMemoryTest(AskBase):
+    def test_whole_vault_is_asked_and_relations_lead_into_the_archive(self):
+        fake = FakeJev([("Retry limit of the label printer", 0.9)])
+        with mock.patch.object(ctx, "_jev_call", side_effect=fake):
+            res = ctx.jev_ask_memory(self.root, QUESTION, 5, show=False)
+        asked = " ".join(text for _req, texts, _crit in fake.calls for text in texts)
+        self.assertIn("Label printer drops jobs", asked)  # archived sections are asked too
+        self.assertNotIn("Never asked", asked)            # templates are not
+        self.assertNotIn('"Notes"', asked)                # nor the MEMORY.md index
+        self.assertNotIn("YYYYMMDD", asked)               # nor placeholder sections
+        self.assertTrue(res["jev"])
+        first = res["notes"][0]
+        self.assertEqual((first["source"], first["id"], first["p"]), ("jev", "DEC-20260905-003", 0.9))
+        self.assertEqual(first["links"], [{"dir": "out", "type": "caused-by", "id": "BUG-20260801-002",
+                                           "title": "BUG-20260801-002 Label printer drops jobs under load",
+                                           "path": "memory/archive/bugs-2026.md"}])
+        record = self.log()[-1]
+        self.assertEqual((record["source"], record["kind"]), ("ask", "memory"))
+        self.assertEqual(record["picked"], ["DEC-20260905-003 Retry limit of the label printer is 5"])
+        self.assertNotIn("принтера", json.dumps(record, ensure_ascii=False))
+        self.assertNotIn(KEY, json.dumps(record))
+
+    def test_show_prints_the_pick_then_its_linked_entry_within_the_bounds(self):
+        fake = FakeJev([("Retry limit of the label printer", 0.9)])
+        with mock.patch.object(ctx, "_jev_call", side_effect=fake):
+            res = ctx.jev_ask_memory(self.root, QUESTION, 5, show=True)
+            self.assertEqual([b["heading"][:16] for b in res["bodies"]][:2],
+                             ["DEC-20260905-003", "BUG-20260801-002"])
+            self.assertIn("Retry limit 2 was too low", res["bodies"][1]["body"])
+            with mock.patch.object(ctx, "JEV_SHOW_CHARS", 60):
+                res = ctx.jev_ask_memory(self.root, QUESTION, 5, show=True)
+        self.assertEqual(len(res["bodies"]), 1)
+        self.assertTrue(res["bodies"][0]["body"].endswith(" ..."))
+        self.assertLessEqual(len(res["bodies"][0]["body"]), 64)
+        self.assertGreaterEqual(res["left_out"], 1)
+
+    def test_text_and_json_output(self):
+        fake = FakeJev([("Retry limit of the label printer", 0.9)])
+        with mock.patch.object(ctx, "_jev_call", side_effect=fake):
+            code, text = self.cli(QUESTION)
+            self.assertEqual(code, 0)
+            self.assertIn("1 of 4 sections matched (Jev", text)
+            self.assertIn("[jev 0.90]", text)
+            self.assertIn("-> caused-by BUG-20260801-002 Label printer drops jobs under load "
+                          "(memory/archive/bugs-2026.md)", text)
+            code, raw = self.cli(QUESTION, json=True)
+        self.assertEqual(json.loads(raw)["notes"][0]["id"], "DEC-20260905-003")
+
+    def test_off_no_key_cap_or_error_fall_back_to_words(self):
+        never = mock.patch.object(ctx, "_jev_call", side_effect=AssertionError("no call"))
+        ctx.jev_enable(self.root, False)
+        with never:
+            res = ctx.jev_ask_memory(self.root, "retry limit printer", 5, show=False)
+            self.assertFalse(res["jev"])
+            self.assertIn("off", res["reason"])
+            self.assertEqual(res["notes"][0]["source"], "words")
+            self.assertEqual(self.cli("ничего такого")[0], 1)  # nothing at all, Jev did not run
+        ctx.jev_enable(self.root, True)
+        with never, mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": ""}), \
+                mock.patch.object(ctx, "jev_key_load", return_value=""):
+            self.assertIn("no key", ctx.jev_ask_memory(self.root, QUESTION, 5, False)["reason"])
+        ctx._jev_log(self.root, {"t": ctx.datetime.datetime.now().isoformat(), "cost": 5.0})
+        with never:
+            self.assertEqual(ctx.jev_ask_memory(self.root, QUESTION, 5, False)["reason"], "daily cap reached")
+        (self.root / ctx.JEV_LOG_PATH).unlink()
+        with mock.patch.object(ctx, "_jev_call", side_effect=TimeoutError("slow")):
+            res = ctx.jev_ask_memory(self.root, "retry limit printer", 5, show=False)
+        self.assertTrue(res["failed"])
+        self.assertTrue(res["notes"])
+        self.assertIn("TimeoutError", self.log()[-1]["error"])
+
+
+class AskCodeTest(AskBase):
+    def setUp(self):
+        super().setUp()
+        files = {
+            "pkg/net.py": '"""Network helpers."""\n\n\ndef open_socket(host):\n    """Open a TCP socket."""\n'
+                          '    return host\n\n\ndef close_socket(sock):\n    """Close it."""\n    return sock\n',
+            "pkg/store.py": '"""Storage."""\n\n\nclass Store:\n    """Key-value store."""\n\n'
+                            '    def put(self, key, value):\n        """Save a value."""\n        return key\n',
+            "conf/app.json": '{"port": 8080}\n',
+            "tests/test_net.py": "def test_open():\n    pass\n",
+        }
+        for rel, text in files.items():
+            (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / rel).write_text(text, encoding="utf-8")
+
+    def test_files_first_then_symbols_of_the_top_three(self):
+        fake = FakeJev([("file `pkg/net.py`", 0.9), ("file `conf/app.json`", 0.6),
+                        ("file `pkg/store.py`", 0.5), ("`open_socket` in", 0.95)])
+        with mock.patch.object(ctx, "_jev_call", side_effect=fake):
+            res = ctx.jev_ask_code(self.root, "где открывается сокет", 5, show=True)
+        hop1, hop2 = fake.calls[0][1], fake.calls[1][1]
+        self.assertIn("`tests/test_net.py`", hop1[-1])  # tests are asked last
+        self.assertEqual(fake.calls[0][2], ctx.JEV_CODE_CRITERIA)
+        self.assertEqual(len(hop2), 4)  # open_socket, close_socket, Store, Store.put
+        self.assertEqual([f["path"] for f in res["top_files"]], ["pkg/net.py", "conf/app.json", "pkg/store.py"])
+        first = res["hits"][0]
+        self.assertEqual((first["source"], first["path"], first["symbol"], first["p"]),
+                         ("jev", "pkg/net.py", "open_socket", 0.95))
+        self.assertIn({"source": "jev", "path": "conf/app.json", "kind": "file", "summary": "", "p": 0.6},
+                      res["hits"])  # a top file without symbols is a hit by itself
+        self.assertIn("4|def open_socket(host):", res["bodies"][0]["body"])
+        record = self.log()[-1]
+        self.assertEqual((record["source"], record["kind"], record["requests"]), ("ask-code", "code", 2))
+        files = len(ctx._code_index(self.root, refresh=False)[0]["files"])
+        self.assertEqual(record["questions"], files + 4)
+        self.assertNotIn("сокет", json.dumps(record, ensure_ascii=False))
+
+    def test_text_output_points_at_code_show(self):
+        fake = FakeJev([("file `pkg/net.py`", 0.9), ("`open_socket` in", 0.95)])
+        with mock.patch.object(ctx, "_jev_call", side_effect=fake):
+            code, text = self.cli("где открывается сокет", code=True)
+        self.assertEqual(code, 0)
+        self.assertIn("- [jev 0.95] pkg/net.py:4  function  open_socket - Open a TCP socket.", text)
+        self.assertIn("# read one: python arbor.py code show pkg/net.py:open_socket", text)
+
+    def test_without_jev_the_lexical_index_answers_and_dir_narrows(self):
+        ctx.jev_enable(self.root, False)
+        with mock.patch.object(ctx, "_jev_call", side_effect=AssertionError("no call")):
+            res = ctx.jev_ask_code(self.root, "open socket", 5, show=False)
+            self.assertEqual((res["hits"][0]["source"], res["hits"][0]["symbol"]), ("words", "open_socket"))
+            self.assertEqual(ctx.jev_ask_code(self.root, "open socket", 5, False, prefix="pkg/store")["hits"], [])
+            code, text = self.cli("сокет", code=True)
+        self.assertEqual(code, 1)
+        self.assertIn("Jev did not run", text)
+
+
 if __name__ == "__main__":
     unittest.main()

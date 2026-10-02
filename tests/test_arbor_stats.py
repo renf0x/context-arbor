@@ -137,7 +137,7 @@ class StatsTests(unittest.TestCase):
                 turn(context, thinking=60)
         return records
 
-    def test_why_finds_compactions_their_size_and_suggests_clear(self):
+    def test_why_finds_compactions_their_size_and_suggests_a_fixed_window(self):
         self.write("s1.jsonl", self.why_session())
         report = ctx._why_report(self.dir, None)
         self.assertEqual(len(report), 1)
@@ -150,7 +150,7 @@ class StatsTests(unittest.TestCase):
         self.assertGreater(row["compaction_share"], 0.10)
         self.assertEqual(row["compactions_manual"], 3)
         self.assertAlmostEqual(row["compaction_payback_turns"], 60.0)  # 60k written * 2.0 / (20k dropped * 0.1)
-        self.assertTrue(any("Use /clear instead" in tip and "3 of them manual /compact" in tip
+        self.assertTrue(any("/autocompact 200k" in tip and "3 of them manual /compact" in tip
                             and "to win back" in tip for tip in row["advice"]))
         self.assertTrue(any("thinking is 60%" in tip for tip in row["advice"]))
 
@@ -172,7 +172,7 @@ class StatsTests(unittest.TestCase):
         self.write("s1.jsonl", self.why_session(compactions=0, per_segment=200))  # 65k -> 465k
         row = ctx._why_report(self.dir, None)[0]
         self.assertGreater(row["long_run_share"], 0.25)
-        self.assertTrue(any("session limit --stop" in tip for tip in row["advice"]))
+        self.assertTrue(any("200k+ above" in tip and "/autocompact" in tip for tip in row["advice"]))
         prices = {"input": 3.0, "cache_write": 3.75, "cache_read": 0.3, "output": 15.0}
         self.assertAlmostEqual(ctx._why_report(self.dir, prices)[0]["long_run_share"],
                                row["long_run_share"], delta=0.15)
@@ -190,6 +190,69 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(json.loads(out)["why"][0]["compactions"], 3)
         code, out, _ = self.run_cli("stats", "--json", "--path", project, "--transcripts", str(self.dir))
         self.assertNotIn("why", json.loads(out))
+
+    def test_parse_window_takes_what_autocompact_takes(self):
+        self.assertEqual([ctx._parse_window(t) for t in ("250k", "1M", "200", "300000", " 967K ")],
+                         [250_000, 1_000_000, 200_000, 300_000, 967_000])
+        for bad in ("50k", "2M", "abc", ""):
+            with self.assertRaises(ValueError):
+                ctx._parse_window(bad)
+
+    def test_replay_above_the_peak_reproduces_the_recorded_cost(self):
+        turns = ctx._diagnose_transcript(self.write_path("s1.jsonl", self.why_session(0, 25)))
+        model = ctx._compaction_model([turns])
+        recorded = ctx._replay(turns, None, model, None)
+        replayed = ctx._replay(turns, 1_000_000, model, None)
+        self.assertAlmostEqual(replayed["cost"], recorded["cost"])
+        self.assertAlmostEqual(recorded["cost"], sum(sum(ctx._turn_cost(t, None)) for t in turns))
+        self.assertEqual((recorded["compactions"], replayed["compactions"]), (0, 0))
+
+    def test_replay_compacts_at_the_window_and_restarts_from_the_carry_over(self):
+        turns = ctx._diagnose_transcript(self.write_path("s1.jsonl", self.why_session(0, 200)))
+        model = {"carry": 20_000, "rewrite": 30_000, "summary": 3_000, "measured": 0}
+        recorded = ctx._replay(turns, None, model, None)      # 65k -> 465k, never compacted
+        replayed = ctx._replay(turns, 200_000, model, None)   # 65k -> 201k, then 85k -> 201k twice
+        self.assertEqual(replayed["compactions"], 3)
+        self.assertLess(replayed["avg_context"], recorded["avg_context"])
+        self.assertLess(replayed["cost"], recorded["cost"])
+
+    def test_compaction_model_measures_the_users_own_compactions(self):
+        records = []
+        for r in self.why_session():          # three compactions: 120k -> 100k, 60k rewritten
+            records.append(r)
+            if r.get("subtype") == "compact_boundary":
+                records.append({"type": "user", "isCompactSummary": True, "uuid": r["uuid"] + "s",
+                                "message": {"role": "user", "content": [{"type": "text", "text": "x" * 7_000}]}})
+        turns = ctx._diagnose_transcript(self.write_path("s1.jsonl", records))
+        model = ctx._compaction_model([turns])
+        self.assertEqual((model["measured"], model["carry"], model["rewrite"]), (3, 35_000, 60_000))
+        self.assertAlmostEqual(model["summary"], 7_000 / ctx.CHARS_PER_TOKEN)
+        recorded = ctx._replay(turns, None, model, None)
+        self.assertEqual(recorded["compactions"], 3)
+        self.assertGreater(recorded["cost"], sum(sum(ctx._turn_cost(t, None)) for t in turns))
+
+    def test_cli_simulate_compact_prints_a_table_and_json_carries_it(self):
+        self.write("s1.jsonl", self.why_session(0, 200))
+        project = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, project, True)
+        code, out, _ = self.run_cli("stats", "--simulate-compact", "200k,1M", "--path", project,
+                                    "--transcripts", str(self.dir))
+        self.assertEqual(code, 0)
+        self.assertIn("# simulate-compact", out)
+        self.assertIn("suggested window: 200k", out)
+        code, out, _ = self.run_cli("stats", "--simulate-compact", "--json", "--path", project,
+                                    "--transcripts", str(self.dir))
+        sim = json.loads(out)["simulate"]
+        self.assertEqual(sim["windows"], [150_000, 200_000, 250_000, 300_000, 400_000, 967_000])
+        self.assertEqual(sim["sessions"][0]["windows"]["967000"]["compactions"], 0)  # peak is 465k
+        code, _, err = self.run_cli("stats", "--simulate-compact", "20k", "--path", project,
+                                    "--transcripts", str(self.dir))
+        self.assertEqual(code, 2)
+        self.assertIn("--simulate-compact", err)
+
+    def write_path(self, rel, records):
+        self.write(rel, records)
+        return self.dir / rel
 
     def test_cli_explains_a_missing_transcript_folder_and_bad_prices(self):
         project = tempfile.mkdtemp()

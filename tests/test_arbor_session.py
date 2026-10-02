@@ -108,9 +108,9 @@ class SessionTests(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(ctx.cmd_session_gauge(self.gauge_args(p)), 0)
         self.assertIn("[arbor gauge]", out.getvalue())
-        self.assertIn("clear NOW", out.getvalue())
-        self.assertIn("/clear", out.getvalue())
-        self.assertNotIn("recommend /compact", out.getvalue())
+        self.assertIn("/compact now", out.getvalue())
+        self.assertIn("/autocompact 200k", out.getvalue())
+        self.assertNotIn("/clear", out.getvalue())
 
     def test_gauge_uses_last_main_chain_usage(self):
         p = self.write_transcript([
@@ -120,6 +120,23 @@ class SessionTests(unittest.TestCase):
                 "cache_read_input_tokens": 100}}},
         ])
         self.assertEqual(ctx._last_context_tokens(p), 130_000)
+
+    def test_a_compaction_resets_the_live_context_until_the_next_turn(self):
+        before = [{"type": "assistant", "message": {"role": "assistant", "usage": {
+                      "input_tokens": 10, "cache_read_input_tokens": 60_000}}},
+                  {"type": "assistant", "message": {"role": "assistant", "usage": {
+                      "input_tokens": 10, "cache_read_input_tokens": 290_000}}},
+                  {"type": "system", "subtype": "compact_boundary",
+                   "compactMetadata": {"trigger": "manual", "preTokens": 290_010}},
+                  {"type": "user", "isCompactSummary": True,
+                   "message": {"role": "user", "content": "summary"}}]
+        p = self.write_transcript(before)
+        self.assertEqual(ctx._last_context_tokens(p), 0)  # the last turn still says 290k
+        self.assertEqual(self.run_hook(ctx.cmd_session_gauge, p), "")
+        after = self.write_transcript(before + [{"type": "assistant", "message": {
+            "role": "assistant", "usage": {"input_tokens": 10, "cache_read_input_tokens": 75_000}}}],
+            name="after.jsonl")
+        self.assertEqual(ctx._context_growth(after), (75_010, 15_000))
 
     def turns(self, *sizes, name="t.jsonl"):
         """A transcript whose main-chain assistant turns have these total context sizes."""
@@ -140,28 +157,30 @@ class SessionTests(unittest.TestCase):
     def test_gauge_thresholds_are_growth_over_the_first_turn(self):
         quiet = self.turns(65_000, 90_000)          # +25k: a big prefix alone is not a reason
         self.assertEqual(self.run_hook(ctx.cmd_session_gauge, quiet), "")
-        soon = self.turns(65_000, 130_000, name="soon.jsonl")   # +65k
+        early = self.turns(65_000, 190_000, name="early.jsonl")  # +125k: below the window
+        self.assertEqual(self.run_hook(ctx.cmd_session_gauge, early), "")
+        soon = self.turns(65_000, 215_000, name="soon.jsonl")   # +150k: about the 200k window
         text = self.run_hook(ctx.cmd_session_gauge, soon)
-        self.assertIn("clear soon", text)
-        self.assertIn("+65k since the session started", text)
-        now = self.turns(65_000, 200_000, name="now.jsonl")     # +135k
-        self.assertIn("clear NOW", self.run_hook(ctx.cmd_session_gauge, now))
+        self.assertIn("/compact at the next break", text)
+        self.assertIn("+150k since the session started", text)
+        now = self.turns(65_000, 315_000, name="now.jsonl")     # +250k
+        self.assertIn("/compact now", self.run_hook(ctx.cmd_session_gauge, now))
 
     def test_guard_speaks_once_per_level_and_stays_silent_before_a_threshold(self):
         p = self.turns(65_000, 70_000)
         self.assertEqual(self.run_hook(ctx.cmd_session_guard, p, session_id="s1"), "")
-        p = self.turns(65_000, 140_000, name="warn.jsonl")      # +75k -> level 1
+        p = self.turns(65_000, 215_000, name="warn.jsonl")      # +150k -> level 1
         first = json.loads(self.run_hook(ctx.cmd_session_guard, p, session_id="s1"))
         note = first["hookSpecificOutput"]
         self.assertEqual(note["hookEventName"], "PreToolUse")
         self.assertIn("at the next break", note["additionalContext"])
         self.assertNotIn("permissionDecision", note)
         self.assertEqual(self.run_hook(ctx.cmd_session_guard, p, session_id="s1"), "")  # same level
-        p = self.turns(65_000, 200_000, name="crit.jsonl")      # +135k -> level 2
+        p = self.turns(65_000, 315_000, name="crit.jsonl")      # +250k -> level 2
         second = json.loads(self.run_hook(ctx.cmd_session_guard, p, session_id="s1"))
-        self.assertIn("/clear NOW", second["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("/compact now", second["hookSpecificOutput"]["additionalContext"])
         again = self.run_hook(ctx.cmd_session_guard, self.turns(65_000, 70_000, name="reset.jsonl"),
-                              session_id="s1")               # after a /clear the level resets
+                              session_id="s1")               # after a compaction the level resets
         self.assertEqual(again, "")
         self.assertIn("at the next break", self.run_hook(
             ctx.cmd_session_guard, p.with_name("warn.jsonl"), session_id="s1"))
@@ -177,7 +196,7 @@ class SessionTests(unittest.TestCase):
         denied = json.loads(self.run_hook(ctx.cmd_session_guard, p, session_id="a", tool_name="Read",
                                           tool_input={"file_path": "x.py"}))["hookSpecificOutput"]
         self.assertEqual(denied["permissionDecision"], "deny")
-        self.assertIn("/clear", denied["permissionDecisionReason"])
+        self.assertIn("/compact", denied["permissionDecisionReason"])
         self.assertIn("+235k", denied["permissionDecisionReason"])
         for command in ("python arbor.py session save --note x", "cd \"/d/My Proj\" && python3 arbor.py memory query q"):
             self.assertEqual(self.run_hook(ctx.cmd_session_guard, p, session_id="a", tool_name="Bash",
@@ -209,9 +228,9 @@ class SessionTests(unittest.TestCase):
             with contextlib.redirect_stdout(out):
                 self.assertEqual(ctx.cmd_session_limit(args), 0)
             return out.getvalue()
-        self.assertIn("warn +60k, clear-now +120k, hard stop off", limit())
+        self.assertIn("warn +140k, compact-now +240k, hard stop off", limit())
         self.assertIn("warn +40k", limit(warn_growth=40_000))
-        self.assertIn("warn +40k, clear-now +120k, hard stop +200k", limit(stop_growth=200_000))
+        self.assertIn("warn +40k, compact-now +240k, hard stop +200k", limit(stop_growth=200_000))
         self.assertEqual(json.loads(Path(".arbor/config.json").read_text(encoding="utf-8"))["context"],
                          {"warn_growth": 40_000, "stop_growth": 200_000})
 

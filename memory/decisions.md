@@ -90,7 +90,7 @@
 
 ## DEC-20260929-006 /clear replaces /compact
 
-- Status: active
+- Status: superseded
 - Date: 2026-09-29
 - Decision: Make `/clear` the model-free way to shrink context. A `SessionEnd` hook (matcher
   `clear`) snapshots the session; `SessionStart` (clear, compact, resume) restores it together
@@ -140,3 +140,13 @@
   English vault. Everything else stays model-free.
 - Relations: depends-on:INV-20261001-004
 - Links: [[investigations#INV-20261001-004 Does Jev save memory-read tokens (bench co-mem)]]
+
+## DEC-20261002-001 Compaction at a fixed window replaces /clear for long sessions
+
+- Status: active
+- Date: 2026-10-02
+- Decision: Compaction is the long-session path; Arbor never blocks it. The v0.5 PreCompact guard (`session compact-guard`) is a no-op kept so old settings parse (an unknown subcommand exits 2, which would block); `init` removes its hooks; `session compaction` only prints what to set. Adapters ask for `/autocompact 200k` (Codex: `model_auto_compact_token_limit`) and tell the summary what to keep. Gauge/guard thresholds become +140k (suggest /compact at the next break) and +240k (now); the opt-in hard stop asks for /compact. The live context reads 0 between a compact_boundary and the next turn (it used to report the pre-compaction size).
+- Reason: Users do not restart a session every few tasks ('after every message /clear is idiotic'). Replaying 4739 real turns (`stats --simulate-compact`, INV-20261002-002): fixed window 200k = 0.85x of the recorded cost, 300k 0.95x, 400k 1.09x, the ~967k default of 1M models 2.00x; frequent manual /compact 152k -> 109k gained little. The window, not the mechanism, decides the cost.
+- Consequences: The user runs `/autocompact 200k` once (saved in user settings; Arbor does not write `autoCompactWindow` itself: its stored format is undocumented). Claude Code re-injects the project CLAUDE.md after compaction and SessionStart(compact) restores the Arbor state. Not yet measured on live sessions; re-check with `stats --why` after a few long sessions.
+- Relations: supersedes:DEC-20260929-006, relates-to:INV-20261002-002
+- Links: [[operations]], `arbor.py` (`_compact_advice`, `CONTEXT_LIMIT_DEFAULTS`, `_drop_retired_hooks`, `_last_context_tokens`)
