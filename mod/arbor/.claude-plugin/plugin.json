@@ -1,0 +1,51 @@
+{
+  "name": "arbor",
+  "version": "0.1.0",
+  "description": "Context Arbor in Claude Code: memory and code tools, a guard on whole reads of large files, compaction between turns at your window, a lean start context, Jev and exact per-turn accounting.",
+  "userConfig": {
+    "python": {
+      "type": "string",
+      "title": "Python",
+      "description": "The interpreter that runs arbor.py.",
+      "default": "python"
+    },
+    "readGuardKb": {
+      "type": "number",
+      "title": "Read guard, KB",
+      "description": "A whole Read of an indexed file larger than this answers with its outline first; 0 turns the guard off.",
+      "default": 40
+    },
+    "compactAt": {
+      "type": "string",
+      "title": "Compact at",
+      "description": "Compact between turns once the context reaches this size; auto takes the window your own sessions replay cheapest (session compaction --json).",
+      "options": ["auto", "off", "150k", "200k", "250k", "300k"],
+      "default": "auto"
+    },
+    "slimInstructions": {
+      "type": "boolean",
+      "title": "Lean CLAUDE.md block",
+      "description": "Replace the Context Arbor block of CLAUDE.md with a short one that points at the arbor tools, and attach the active task from memory/NOW.md.",
+      "default": true
+    },
+    "jevProvider": {
+      "type": "string",
+      "title": "Jev",
+      "description": "Who picks the notes for each prompt: arbor (OpenRouter, as `arbor.py jev on` set it), claude (a model of your Claude plan, daily cap from .arbor/config.json) or off.",
+      "options": ["arbor", "claude", "off"],
+      "default": "arbor"
+    },
+    "jevModel": {
+      "type": "string",
+      "title": "Jev model (claude)",
+      "description": "Model alias or id for jevProvider=claude.",
+      "default": "haiku"
+    },
+    "recordTurns": {
+      "type": "boolean",
+      "title": "Record turns",
+      "description": "Append each turn's exact tokens and the session cost to .arbor/turns.jsonl (numbers only) for arbor stats and arbor ui.",
+      "default": true
+    }
+  }
+}
