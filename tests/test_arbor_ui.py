@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 import re
 import shutil
@@ -347,6 +348,25 @@ class UiCommandTests(UiTestCase):
         code, _, err = self.run_cli("ui", "--path", bare)
         self.assertEqual(code, 2)
         self.assertIn("nothing to show", err)
+
+
+class MeasuredKpiTest(UiTestCase):
+    USAGE = {"dir": "x", "cache_share": 0.9,
+             "totals": {"input": 100, "cache_write": 1_000, "cache_read": 900_000, "output": 5_000,
+                        "turns": 3, "subagent_turns": 0, "peak_context": 300_000},
+             "sessions": []}
+
+    def test_measured_kpi_shows_only_with_turn_records(self):
+        with mock.patch.object(ctx, "collect_usage", return_value=self.USAGE):
+            self.assertNotIn("счётчику Claude Code", self.render())
+            path = self.root / ctx.TURNS_PATH
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps({"t": "2026-10-01T10:00:00", "session": "a", "usd_total": 2.5}) + "\n",
+                            encoding="utf-8")
+            page = self.render()
+            self.assertIn("счётчику Claude Code", page)
+            self.assertIn("$2.50", page)
+            self.assertIn("measured by Claude Code", self.render("en"))
 
 
 if __name__ == "__main__":
